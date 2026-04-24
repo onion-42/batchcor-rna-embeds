@@ -1,0 +1,44 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "batchcor_rna_emb"
+version = "0.0.1"
+description = "This project is about evaluating batch correction influence on downstream task performance of clinical endpoint classifiers that were based on RNA embeddings of Foundation RNA models. BG Internship 2026(Group 7)."
+authors = [
+  { name = "BG_Internship" },
+]
+
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    
+]
+dependencies = [
+    "ipython",
+    "jupyterlab",
+    "matplotlib",
+    "notebook",
+    "numpy",
+    "pandas",
+    "pip",
+    "python-dotenv",
+    "ruff",
+    "scikit-learn",
+]
+requires-python = "~=3.11.0"
+
+
+[tool.ruff]
+line-length = 99
+src = ["batchcor_rna_emb"]
+include = ["pyproject.toml", "batchcor_rna_emb/**/*.py"]
+
+[tool.ruff.lint]
+extend-select = ["I"]  # Add import sorting
+
+[tool.ruff.lint.isort]
+known-first-party = ["batchcor_rna_emb"]
+force-sort-within-sections = true
+
