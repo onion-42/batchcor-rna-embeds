@@ -6,6 +6,17 @@
 
 This project is about evaluating batch correction influence on downstream task performance of clinical endpoint classifiers that were based on RNA embeddings of Foundation RNA models. BG Internship 2026(Group 7).
 
+Сделать окружение:
+```python
+python3.11 -m venv <YOUR_VENV_FOLDER>/batcor_env
+source <YOUR_VENV_FOLDER>/batcor_env/bin/activate
+pip install -e  . #from this repo folder!!
+python -m ipykernel install \
+  --user \
+  --name=batcor_env \
+  --display-name "Python3.11 (batcor_env)"
+  ```
+
 ## Project Organization
 
 ```

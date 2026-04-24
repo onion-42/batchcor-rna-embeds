@@ -16,6 +16,7 @@ classifiers = [
     
 ]
 dependencies = [
+    # --- existing ---
     "ipython",
     "jupyterlab",
     "matplotlib",
@@ -26,6 +27,30 @@ dependencies = [
     "python-dotenv",
     "ruff",
     "scikit-learn",
+    "ipykernel",
+    # --- data I/O ---
+    "anndata>=0.10",
+    "zarr>=2.16,<3",
+    # --- batch correction & embedding ---
+    "scanpy>=1.9,<1.11",
+    "harmonypy>=0.0.9",
+    "umap-learn>=0.5",
+    # --- DANN ---
+    "torch>=2.0",
+    # --- structural metrics ---
+    "scib-metrics>=0.5",
+    "scipy>=1.11",
+    # --- downstream ML ---
+    "tabpfn>=2.0",
+    "lightautoml>=0.3",
+    "optuna>=3.0",
+    "kneed>=0.8",
+    # --- survival ---
+    "lifelines>=0.27",
+    # --- logging & viz ---
+    "loguru>=0.7",
+    "seaborn>=0.12",
+    "tqdm>=4.0",
 ]
 requires-python = "~=3.11.0"
 

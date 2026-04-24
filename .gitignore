@@ -189,3 +189,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+#internal notebook
+references/harmony_backtrack.ipynb
+
