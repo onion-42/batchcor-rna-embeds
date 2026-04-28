@@ -2,12 +2,13 @@
 
 Ported from eury_main utils_metrics with adaptations for this project.
 """
+
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 from lifelines import CoxPHFitter
 from loguru import logger
+import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -99,7 +100,9 @@ def evaluate_binary_classifier(
         "f1": f1_score(y_true, y_pred, zero_division=0),
         "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
         "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
-        "pr_auc": average_precision_score(y_true, probabilities) if n_classes > 1 else np.nan,
+        "pr_auc": average_precision_score(y_true, probabilities)
+        if n_classes > 1
+        else np.nan,
         "roc_auc": roc_auc_score(y_true, probabilities) if n_classes > 1 else np.nan,
         "accuracy": accuracy_score(y_true, y_pred),
         "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),

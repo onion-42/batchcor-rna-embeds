@@ -193,3 +193,5 @@ cython_debug/
 #internal notebook
 references/harmony_backtrack.ipynb
 
+# data folder
+notebooks/data/

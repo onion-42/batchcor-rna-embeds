@@ -1,4 +1,5 @@
 """Константы, пути и ключи проекта batch correction RNA embeddings."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,8 +18,8 @@ FIGURES_DIR: Path = REPORTS_DIR / "figures"
 MODELS_DIR: Path = PROJECT_ROOT / "models"
 
 # --- AnnData keys ---
-BATCH_COL: str = "batch"
-DIAGNOSIS_COL: str = "diagnosis"
+BATCH_COL: str = "RNA_batch"
+DIAGNOSIS_COL: str = "Diagnosis"
 SPLIT_PREFIX: str = "Split_"
 TARGET_PREFIX: str = "Target_"
 

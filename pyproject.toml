@@ -30,7 +30,7 @@ dependencies = [
     "ipykernel",
     # --- data I/O ---
     "anndata>=0.10",
-    "zarr>=2.16,<3",
+    "zarr>=3.0",
     # --- batch correction & embedding ---
     "scanpy>=1.9,<1.11",
     "harmonypy>=0.0.9",
@@ -51,6 +51,7 @@ dependencies = [
     "loguru>=0.7",
     "seaborn>=0.12",
     "tqdm>=4.0",
+    "imp"
 ]
 requires-python = "~=3.11.0"
 
