@@ -35,6 +35,11 @@ dependencies = [
     "scanpy>=1.9,<1.11",
     "harmonypy>=0.0.9",
     "umap-learn>=0.5",
+    # --- foundation models ---
+    "immuno-compass>=2.3",
+    "einops",
+    "gdown",
+    "qnorm",
     # --- DANN ---
     "torch>=2.0",
     # --- structural metrics ---
