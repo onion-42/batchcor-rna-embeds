@@ -1,5 +1,18 @@
 # Expression matrix with HUGO symbols in columns.
 
+Какие базы есть в mygene:
+
+```python
+    GeneIdFormats = ["symbol",             # HGNC symbol, e.g. "TP53"
+    "entrezgene",         # Entrez Gene ID, e.g. "7157"
+    "ensembl.gene",       # ENSG00000141510
+    "ensembl.transcript", # ENST...
+    "ensembl.protein",    # ENSP...
+    "uniprot",            # Swiss-Prot accession, e.g. "P04637"
+    "refseq",             # NM_/NP_/XM_...
+    "hgnc",]               # numeric HGNC id
+```
+
 # Пример использования
 
 ```python
