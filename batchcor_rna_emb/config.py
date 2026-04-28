@@ -26,6 +26,28 @@ TARGET_PREFIX: str = "Target_"
 # Embedding keys in .obsm (FM = Foundation Model)
 EMBEDDING_KEY_PATTERN: str = "FM_{model}_embeddings"
 
+# --- COMPASS Foundation Model ---
+COMPASS_MODEL_NAME: str = "FM_COMPASS"
+COMPASS_EMBEDDING_KEY: str = "FM_COMPASS_embedding"
+COMPASS_PCA_KEY: str = "PCA128d_FM_COMPASS_embedding"
+COMPASS_UMAP_KEY: str = "UMAP3d_FM_COMPASS_embedding"
+COMPASS_METADATA_KEY: str = "FM_COMPASS_metadata"
+COMPASS_MODEL_URL: str = (
+    "https://www.immuno-compass.com/download/model/finetuner_pft_all.pt"
+)
+COMPASS_N_PCA: int = 128
+COMPASS_N_UMAP: int = 3
+
+# Cancer code mapping for COMPASS (TCGA abbreviations)
+COHORT_CANCER_CODE: dict[str, str] = {
+    "KIRC_Tissue_ICI_Pred": "KIRC",
+    "Melanoma_Tissue_ICI_Pred": "SKCM",
+    "NSCLC_Tissue_ICI_Pred": "LUAD",
+    "PUB_BLCA_Mariathasan_EGAS00001002556_ICI": "BLCA",
+    "PUB_ccRCC_Immotion150_and_151_ICI": "KIRC",
+    "PUB_ccRCC_Immotion150_and_151_TKI": "KIRC",
+}
+
 # Keys written by correction modules into .obsm
 HARMONY_SUFFIX: str = "_Harmony"
 DANN_SUFFIX: str = "_DANN"
