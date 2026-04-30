@@ -71,11 +71,23 @@ def load_cohort(path: str | Path) -> ad.AnnData:
         if "Categorical categories must be unique" in str(exc):
             logger.warning(
                 "Detected duplicate categories in '{}', "
-                "applying zarr-level fix before reload",
+                "copying to temp dir and fixing before reload",
                 path.stem,
             )
-            _fix_zarr_duplicate_categories(path)
-            adata = ad.read_zarr(path)
+            import shutil
+            import tempfile
+
+            # Copy to local temp dir (GDrive doesn't support os.link)
+            tmp_dir = Path(tempfile.mkdtemp())
+            local_zarr = tmp_dir / path.name
+            shutil.copytree(str(path), str(local_zarr))
+            logger.info("Copied zarr to temp: {}", local_zarr)
+
+            _fix_zarr_duplicate_categories(local_zarr)
+            adata = ad.read_zarr(local_zarr)
+
+            # Clean up temp copy
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         else:
             raise
 
