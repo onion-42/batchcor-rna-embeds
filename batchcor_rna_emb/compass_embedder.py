@@ -165,6 +165,27 @@ def extract_compass_embeddings(
     """
     df_tpm = build_tpm_for_compass(adata, cancer_code)
 
+    # Align gene columns to model expectations
+    expected_genes = list(model.feature_name)
+    available_genes = set(df_tpm.columns) - {"cancer_type"}
+    missing_genes = [g for g in expected_genes if g not in available_genes]
+    matched_genes = [g for g in expected_genes if g in available_genes]
+
+    logger.info(
+        "Gene alignment: model expects {} genes, data has {} genes, "
+        "matched={}, missing={} (filled with 0.0)",
+        len(expected_genes),
+        len(available_genes),
+        len(matched_genes),
+        len(missing_genes),
+    )
+    if missing_genes:
+        logger.debug("Missing genes (first 10): {}", missing_genes[:10])
+
+    # Add missing genes as zero columns
+    for gene in missing_genes:
+        df_tpm[gene] = np.float32(0.0)
+
     logger.info("Running COMPASS model.project() with batch_size={}", batch_size)
     dfgs, _dfct = model.project(df_tpm, batch_size=batch_size)
 
