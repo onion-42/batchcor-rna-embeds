@@ -333,7 +333,7 @@ def load_compass_model(
         raise FileNotFoundError(f"COMPASS model not found: {model_path}")
 
     logger.info("Loading COMPASS model from '{}' to device='{}'", model_path, device)
-    model = loadcompass(str(model_path), map_location=device)
+    model = loadcompass(str(model_path), map_location=device, weights_only=False)
 
     # Получаем версию пакета
     try:
