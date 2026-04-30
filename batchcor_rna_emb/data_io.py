@@ -44,7 +44,7 @@ def load_cohort(path: str | Path) -> ad.AnnData:
     Load a single AnnData cohort from a Zarr store.
 
     Handles pandas >=2.0 incompatibility with duplicate categorical
-    categories by deduplicating them after load.
+    categories by temporarily patching ``pd.Categorical.from_codes``.
 
     Parameters
     ----------
@@ -65,33 +65,9 @@ def load_cohort(path: str | Path) -> ad.AnnData:
     if not path.exists():
         raise FileNotFoundError(f"Zarr store not found: {path}")
 
-    try:
-        adata = ad.read_zarr(path)
-    except ValueError as exc:
-        if "Categorical categories must be unique" in str(exc):
-            logger.warning(
-                "Detected duplicate categories in '{}', "
-                "copying to temp dir and fixing before reload",
-                path.stem,
-            )
-            import shutil
-            import tempfile
+    adata = _read_zarr_safe(path)
 
-            # Copy to local temp dir (GDrive doesn't support os.link)
-            tmp_dir = Path(tempfile.mkdtemp())
-            local_zarr = tmp_dir / path.name
-            shutil.copytree(str(path), str(local_zarr))
-            logger.info("Copied zarr to temp: {}", local_zarr)
-
-            _fix_zarr_duplicate_categories(local_zarr)
-            adata = ad.read_zarr(local_zarr)
-
-            # Clean up temp copy
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        else:
-            raise
-
-    # Post-load safety net for any remaining duplicates
+    # Post-load safety net
     _dedup_categorical_columns(adata.obs)
     _dedup_categorical_columns(adata.var)
 
@@ -99,6 +75,50 @@ def load_cohort(path: str | Path) -> ad.AnnData:
         "Loaded cohort '{}': {} samples x {} genes",
         path.stem, adata.n_obs, adata.n_vars,
     )
+    return adata
+
+
+def _read_zarr_safe(path: Path) -> ad.AnnData:
+    """Read Zarr store with automatic duplicate-category handling.
+
+    Temporarily patches ``pd.Categorical.from_codes`` to deduplicate
+    categories before construction, then restores the original.
+
+    Parameters
+    ----------
+    path : Path
+        Path to Zarr store.
+
+    Returns
+    -------
+    ad.AnnData
+        Loaded AnnData.
+    """
+    import numpy as np
+
+    _original_from_codes = pd.Categorical.from_codes
+
+    @classmethod  # type: ignore[misc]
+    def _patched_from_codes(cls, codes, categories, ordered=None, dtype=None, validate=True):  # noqa: N805
+        cats = pd.Index(categories)
+        if not cats.is_unique:
+            logger.debug("Deduplicating categories in Categorical.from_codes")
+            unique_cats = cats.drop_duplicates()
+            # Remap codes to deduplicated indices
+            old_to_new = {old: unique_cats.get_loc(cats[old]) for old in range(len(cats))}
+            codes = np.array(
+                [old_to_new.get(int(c), c) if c >= 0 else c for c in codes],
+                dtype=np.intp,
+            )
+            categories = unique_cats
+        return _original_from_codes(codes, categories, ordered=ordered, dtype=dtype)
+
+    try:
+        pd.Categorical.from_codes = _patched_from_codes
+        adata = ad.read_zarr(path)
+    finally:
+        pd.Categorical.from_codes = _original_from_codes
+
     return adata
 
 
