@@ -115,7 +115,7 @@ def _fix_zarr_duplicate_categories(zarr_path: Path) -> None:
         frame = root[frame_name]
         for col_name in list(frame.keys()):
             col = frame[col_name]
-            if not isinstance(col, zarr.hierarchy.Group):
+            if not isinstance(col, zarr.Group):
                 continue
             if "categories" not in col or "codes" not in col:
                 continue
