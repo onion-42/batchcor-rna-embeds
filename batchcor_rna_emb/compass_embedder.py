@@ -34,8 +34,8 @@ def build_tpm_for_compass(
 ) -> pd.DataFrame:
     """Конвертирует AnnData expression matrix в формат COMPASS.
 
-    COMPASS ожидает DataFrame, где первый столбец — cancer type code (TCGA),
-    а остальные столбцы — гены (TPM-нормализованная экспрессия).
+    COMPASS ожидает DataFrame, где первый столбец — cancer type code
+    как **числовой** TCGA индекс, а остальные — гены (TPM).
 
     Parameters
     ----------
@@ -47,15 +47,34 @@ def build_tpm_for_compass(
     Returns
     -------
     pd.DataFrame
-        DataFrame shape ``(n_obs, 1 + n_vars)`` с cancer code в первом столбце.
+        DataFrame shape ``(n_obs, 1 + n_vars)`` с numeric cancer code
+        в первом столбце. All values float32.
 
     Raises
     ------
     ValueError
-        If ``adata.X`` is None.
+        If ``adata.X`` is None or ``cancer_code`` not in TCGA mapping.
     """
+    # Official COMPASS TCGA cancer type → numeric index mapping
+    _CANCER_CODE_MAP: dict[str, int] = {
+        "ACC": 0, "BLCA": 1, "BRCA": 2, "CESC": 3, "CHOL": 4,
+        "COAD": 5, "DLBC": 6, "ESCA": 7, "GBM": 8, "HNSC": 9,
+        "KICH": 10, "KIRC": 11, "KIRP": 12, "LAML": 13, "LGG": 14,
+        "LIHC": 15, "LUAD": 16, "LUSC": 17, "MESO": 18, "OV": 19,
+        "PAAD": 20, "PCPG": 21, "PRAD": 22, "READ": 23, "SARC": 24,
+        "SKCM": 25, "STAD": 26, "TGCT": 27, "THCA": 28, "THYM": 29,
+        "UCEC": 30, "UCS": 31, "UVM": 32,
+    }
+
     if adata.X is None:
         raise ValueError("adata.X is None — cannot extract TPM expression")
+    if cancer_code not in _CANCER_CODE_MAP:
+        raise ValueError(
+            f"Unknown cancer code '{cancer_code}'. "
+            f"Supported: {list(_CANCER_CODE_MAP.keys())}"
+        )
+
+    numeric_code = np.float32(_CANCER_CODE_MAP[cancer_code])
 
     from scipy import sparse as sp
 
@@ -72,14 +91,15 @@ def build_tpm_for_compass(
         dtype=np.float32,
     )
 
-    # COMPASS требует cancer code в первом столбце
-    df_tpm.insert(0, "cancer_type", cancer_code)
+    # COMPASS требует numeric cancer code в первом столбце
+    df_tpm.insert(0, "cancer_type", numeric_code)
 
     logger.info(
-        "Built COMPASS TPM input: {} samples × {} genes, cancer_code='{}'",
+        "Built COMPASS TPM input: {} samples × {} genes, cancer_code='{}' (numeric={})",
         df_tpm.shape[0],
         df_tpm.shape[1] - 1,
         cancer_code,
+        int(numeric_code),
     )
     return df_tpm
 
