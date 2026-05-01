@@ -1,1 +1,1 @@
-"""Batch correction methods for RNA embeddings (Harmony, DANN)."""
+"""Conditional Autoencoder batch correction (cAE)."""

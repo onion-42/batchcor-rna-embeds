@@ -1,1 +1,1 @@
-"""Downstream ML models: feature extraction, training, evaluation."""
+"""Embedding extraction and H5AD packaging."""
