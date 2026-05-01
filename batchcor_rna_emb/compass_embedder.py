@@ -209,8 +209,13 @@ def extract_compass_embeddings(
     logger.info("Running COMPASS model.project() with batch_size={}", batch_size)
     dfgs, _dfct = model.project(df_tpm, batch_size=batch_size)
 
-    # Определяем количество genesets из модели
-    n_genesets = len(model.model.geneset_feature_name)
+    # Определяем количество genesets из фактического output
+    n_patients = adata.n_obs
+    n_genesets = dfgs.shape[0] // n_patients
+    if dfgs.shape[0] % n_patients != 0:
+        raise ValueError(
+            f"dfgs rows ({dfgs.shape[0]}) not divisible by n_patients ({n_patients})"
+        )
     logger.info(
         "COMPASS project output: dfgs shape={}, n_genesets={}, n_channels={}",
         dfgs.shape,
