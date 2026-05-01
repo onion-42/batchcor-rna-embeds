@@ -40,10 +40,10 @@ COMPASS_N_UMAP: int = 3
 
 # Cancer code mapping for COMPASS (TCGA abbreviations)
 COHORT_CANCER_CODE: dict[str, str] = {
-    "KIRC_Tissue_ICI_Pred": "KIRC",
+    "PUB_KIRC_ICI_combined": "KIRC",
     "Melanoma_Tissue_ICI_Pred": "SKCM",
     "NSCLC_Tissue_ICI_Pred": "LUAD",
-    "PUB_BLCA_Mariathasan_EGAS00001002556_ICI": "BLCA",
+    "PUB_BLCA_Mariathasan_EGAS00001002556": "BLCA",
     "PUB_ccRCC_Immotion150_and_151_ICI": "KIRC",
     "PUB_ccRCC_Immotion150_and_151_TKI": "KIRC",
 }
