@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-05-01T18:30:13.921942",
+  "n_cells": 2027,
+  "n_cohorts": 3,
+  "n_diagnoses": 5,
+  "BATCH_CORRECTION_METRICS": {
+    "BEFORE": {
+      "AvgBATCH_silhouette": -0.15706989169120789,
+      "per_cohort_silhouette": {
+        "KIRC": -0.23286594450473785,
+        "Melanoma": 0.35046103596687317,
+        "NSCLC": -0.21902082860469818
+      },
+      "AvgBIO_ARI": 0.8495339992141346,
+      "AvgBIO_NMI": 0.6940938876235606
+    },
+    "AFTER": {
+      "AvgBATCH_silhouette": 0.882789134979248,
+      "per_cohort_silhouette": {
+        "KIRC": 0.858705997467041,
+        "Melanoma": 0.9511557221412659,
+        "NSCLC": 0.9012747406959534
+      },
+      "AvgBIO_ARI": 0.959642375277807,
+      "AvgBIO_NMI": 0.8829630861778911
+    },
+    "CHANGE": {
+      "AvgBATCH_silhouette_delta": 1.039859026670456,
+      "AvgBIO_ARI_delta": 0.11010837606367241,
+      "AvgBIO_NMI_delta": 0.1888691985543305
+    }
+  }
+}
