@@ -369,7 +369,3 @@ ri, det = robustness_index(combined, emb_key="X_umap")
 5. **Регрессия по downstream-задаче.** Финальная проверка — обучить классификатор на скорректированных stage-1 (test.obsm[EMB_STAGE1_KEY]) и сравнить F1/ROC-AUC с baseline без коррекции. Это тема ноутбука `2.metrics_modeling_stress_test.ipynb`.
 
 ---
-
-## Reasoning Summary
-
-BackTrack Harmony Integration — это асимметричный пайплайн: train проходит через Harmony stage-1 + frozen UMAP, test проецируется на это пространство тремя путями (Stage-2 Harmony, connectivity-barycenter UMAP-проекция, gKNN barycentric back-projection stage-1 эмбеддингов). Ключевая идея — никогда не пересчитывать train-пространство при поступлении новых данных, чтобы downstream-классификатор работал в стабильном признаковом пространстве. Все функции уже реализованы в `batchcor_rna_emb/batch_correction/harmony.py` — студенту нужно лишь вызвать `run_harmony_stage1` + `backtrack_harmony_integration` + `robustness_index`.
