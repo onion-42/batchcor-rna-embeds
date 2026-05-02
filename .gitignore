@@ -10,6 +10,9 @@
 # Auto-generated HTML report (rebuilt by every v4 pipeline run)
 /metrics/metrics_tables.html
 
+# Run logs (committed only on demand)
+logs_*.txt
+
 # Mac OS-specific storage files
 .DS_Store
 
