@@ -1146,7 +1146,11 @@ def run_ood_stress_test(
         (SCGPT_KEY, SCGPT_KEY,   "Raw scGPT + Clinical"),
     ]
     if SCGPT_FT_KEY in train_ad.obsm:
-        if any(SCGPT_FT_KEY in pa.obsm for pa in pub_ads.values()):
+        sft_train = np.asarray(train_ad.obsm[SCGPT_FT_KEY])
+        n_valid_train = int((~np.isnan(sft_train).any(axis=1)).sum())
+        if n_valid_train >= 0.5 * train_ad.n_obs and any(
+            SCGPT_FT_KEY in pa.obsm for pa in pub_ads.values()
+        ):
             ood_pairs.append(
                 (SCGPT_FT_KEY, SCGPT_FT_KEY, "scGPT Fine-tuned + Clinical")
             )
@@ -1716,15 +1720,24 @@ def main() -> None:
         (CAE_KEY,   None,             "cAE-full + Clinical"),
     ]
     if SCGPT_FT_KEY in train_ad.obsm:
-        feature_sets.extend([
-            (SCGPT_FT_KEY, SURVIVAL_PCA_DIM,
-             f"scGPT-FT-PCA{SURVIVAL_PCA_DIM} + Clinical"),
-            (SCGPT_FT_KEY, None, "scGPT-FT-full + Clinical"),
-        ])
-        logger.info(
-            f"Detected obsm['{SCGPT_FT_KEY}'] -> SFT embeddings will be "
-            "benchmarked alongside cAE / raw scGPT."
-        )
+        sft_arr = np.asarray(train_ad.obsm[SCGPT_FT_KEY])
+        n_valid = int((~np.isnan(sft_arr).any(axis=1)).sum())
+        if n_valid < 0.5 * train_ad.n_obs:
+            logger.warning(
+                f"obsm['{SCGPT_FT_KEY}'] only covers {n_valid}/{train_ad.n_obs} "
+                "patients (looks like a partial / smoke SFT run); "
+                "skipping SFT branch in survival benchmark."
+            )
+        else:
+            feature_sets.extend([
+                (SCGPT_FT_KEY, SURVIVAL_PCA_DIM,
+                 f"scGPT-FT-PCA{SURVIVAL_PCA_DIM} + Clinical"),
+                (SCGPT_FT_KEY, None, "scGPT-FT-full + Clinical"),
+            ])
+            logger.info(
+                f"Detected obsm['{SCGPT_FT_KEY}'] -> SFT embeddings will be "
+                f"benchmarked alongside cAE / raw scGPT (n_valid={n_valid})."
+            )
     last_fitted_global: dict | None = None
     last_X_train_global: np.ndarray | None = None
     last_y_train_global: np.ndarray | None = None

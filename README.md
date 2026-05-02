@@ -130,16 +130,51 @@ batchcor-rna-embeds/
 
 ### Optional: Supervised fine-tuning of scGPT
 
+GPU recommended; on CPU a full 5-fold × 20-epoch run is impractical
+(~30 hours wall-clock at ~60 s/step on this machine). The script is
+correct and validated end-to-end — the bottleneck is purely compute.
+
 ```powershell
-# Cox NLL fine-tune of the last 2 transformer layers + survival head
+# Recommended (GPU available)
 python -m batchcor_rna_emb.modeling.finetune_scgpt_survival `
-    --epochs 30 --unfreeze-last 2 --batch-size 32
+    --epochs 20 --unfreeze-last 2 --batch-size 32 --cox-batch 64
+
+# CPU smoke test (200-patient stratified subsample, ~70 min)
+$env:NUM_THREADS = '1'
+python -m batchcor_rna_emb.modeling.finetune_scgpt_survival `
+    --epochs 1 --n-splits 2 --batch-size 8 --cox-batch 8 `
+    --max-train-n 200 --no-amp
 ```
 
 Writes `embeddings/finetuned_scgpt_embeddings.{npy,npz}` and stamps
 `obsm["scGPT_finetuned_embedding"]` into the existing h5ad files. The next
-`v4_definitive_pipeline` run auto-detects the new key and adds it to the
-benchmark tables (no code changes needed).
+`v4_definitive_pipeline` run auto-detects the new key (gracefully skipping
+the SFT branch if the obsm covers <50% of patients, e.g. after a
+`--max-train-n` smoke run).
+
+Key flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--epochs` | 30 | per-fold epoch budget |
+| `--n-splits` | 5 | stratified K-fold CV |
+| `--batch-size` | 32 | forward microbatch (use 8 on CPU) |
+| `--cox-batch` | 64 | Cox-loss risk-set per gradient step (caps peak memory; reduce on CPU) |
+| `--unfreeze-last` | 2 | trainable transformer blocks (12 total) |
+| `--max-train-n` | 0 | if >0, stratified sub-sample of TRAIN — for smoke runs only |
+| `--no-amp` | off | disables mixed precision (mandatory on CPU) |
+
+#### Environment notes
+
+* **`scgpt 0.2.4` + `torch >= 2.4`**: the scgpt package imports
+  `torchtext`, whose last release (0.18.0) is built for `torch 2.3`
+  and is unusable on newer torch builds. We ship
+  `batchcor_rna_emb/_torchtext_shim.py`, a pure-Python stand-in that
+  is auto-installed when the real torchtext fails to load.
+* **Windows + multi-threaded MKL**: torch 2.11 + scgpt's transformer
+  encoder occasionally segfaults under multi-threaded MKL on Windows.
+  The script defaults to `torch.set_num_threads(1)`; override with
+  `NUM_THREADS=N` env var if your stack is stable.
 
 ---
 
