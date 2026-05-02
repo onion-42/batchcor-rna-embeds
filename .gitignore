@@ -7,6 +7,9 @@
 /embeddings/
 /batcor_env/
 
+# Auto-generated HTML report (rebuilt by every v4 pipeline run)
+/metrics/metrics_tables.html
+
 # Mac OS-specific storage files
 .DS_Store
 

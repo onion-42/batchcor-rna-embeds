@@ -1521,6 +1521,90 @@ def log_acceptance_verdict(
         logger.info(line)
 
 
+_REPORT_BANNER_CSS = """
+<style id="bg7-report-skin">
+  :root {
+    --bg7-bg:        #f7fafc;
+    --bg7-card:      #ffffff;
+    --bg7-accent:    #3182ce;
+    --bg7-accent-2:  #2c5282;
+    --bg7-text:      #1a202c;
+    --bg7-muted:     #4a5568;
+    --bg7-good:      #38a169;
+    --bg7-warn:      #d69e2e;
+  }
+  body, .jp-Notebook { background: var(--bg7-bg) !important; }
+  body { color: var(--bg7-text); font-family: -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .jp-Cell { max-width: 1180px; margin: 0 auto; }
+  .jp-MarkdownOutput h1 {
+    color: var(--bg7-accent-2); border-bottom: 3px solid var(--bg7-accent);
+    padding-bottom: 8px;
+  }
+  .jp-MarkdownOutput h2 {
+    color: var(--bg7-accent-2); margin-top: 1.6em;
+    border-left: 4px solid var(--bg7-accent); padding-left: 12px;
+  }
+  .jp-RenderedHTMLCommon table {
+    border-collapse: collapse; box-shadow: 0 2px 6px rgba(0,0,0,.06);
+    border-radius: 8px; overflow: hidden;
+  }
+  .jp-RenderedHTMLCommon th {
+    background: var(--bg7-accent); color: white !important;
+    padding: 10px 14px !important; font-weight: 600 !important;
+  }
+  .jp-RenderedHTMLCommon td { padding: 8px 12px !important; }
+  .jp-RenderedHTMLCommon tr:nth-child(even) { background: #edf2f7; }
+  caption {
+    caption-side: top; color: var(--bg7-accent-2); font-weight: 600;
+    margin-bottom: .35rem; font-size: 1.05em;
+  }
+  .jp-CodeMirrorEditor, .jp-InputArea-editor { display: none !important; }
+  .jp-InputPrompt, .jp-OutputPrompt { display: none !important; }
+</style>
+<div id="bg7-report-banner" style="
+  position: sticky; top: 0; z-index: 999;
+  background: linear-gradient(90deg, #2c5282 0%, #3182ce 100%);
+  color: white; padding: 14px 22px; box-shadow: 0 2px 8px rgba(0,0,0,.18);
+  font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+">
+  <div style="max-width: 1180px; margin: 0 auto;
+              display: flex; align-items: center; justify-content: space-between;">
+    <div>
+      <div style="font-size: 18px; font-weight: 700; letter-spacing: .3px;">
+        BG-Internship · Group 7 — Metrics Report
+      </div>
+      <div style="font-size: 12.5px; opacity: .85; margin-top: 2px;">
+        Auto-generated from <code>metrics/metrics_tables.ipynb</code> ·
+        Code cells hidden for readability
+      </div>
+    </div>
+    <div style="font-size: 12px; opacity: .75;">__BG7_REPORT_DATE__</div>
+  </div>
+</div>
+"""
+
+
+def _inject_html_styling(html_path: Path) -> None:
+    """Prepend a custom banner + CSS skin to the nbconvert HTML output."""
+    from datetime import datetime
+
+    text = html_path.read_text(encoding="utf-8")
+    if "bg7-report-banner" in text:
+        return
+    banner = _REPORT_BANNER_CSS.replace(
+        "__BG7_REPORT_DATE__",
+        datetime.now().strftime("Generated %Y-%m-%d %H:%M"),
+    )
+    if "<body" in text:
+        head, _, rest = text.partition("<body")
+        body_open_end = rest.index(">") + 1
+        text = head + "<body" + rest[:body_open_end] + banner + rest[body_open_end:]
+    else:
+        text = banner + text
+    html_path.write_text(text, encoding="utf-8")
+
+
 def run_metrics_tables_notebook() -> None:
     """Execute ``metrics/metrics_tables.ipynb`` so tables render in the notebook."""
     repo_root = Path(__file__).resolve().parents[2]
@@ -1551,8 +1635,36 @@ def run_metrics_tables_notebook() -> None:
             proc.returncode,
             (proc.stderr or proc.stdout or "").strip(),
         )
-    else:
-        logger.info("Executed metrics/metrics_tables.ipynb (tables refreshed)")
+        return
+    logger.info("Executed metrics/metrics_tables.ipynb (tables refreshed)")
+
+    # Phase 4: also export a styled, share-able HTML report next to the notebook.
+    html_proc = subprocess.run(
+        [
+            sys.executable, "-m", "jupyter", "nbconvert",
+            "--to", "html",
+            "--template", "lab",
+            "--HTMLExporter.embed_images=True",
+            "--output", "metrics_tables.html",
+            str(nb),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if html_proc.returncode != 0:
+        logger.warning(
+            "HTML export failed (exit %s): %s",
+            html_proc.returncode,
+            (html_proc.stderr or html_proc.stdout or "").strip(),
+        )
+        return
+    html_out = repo_root / "metrics" / "metrics_tables.html"
+    if html_out.exists():
+        _inject_html_styling(html_out)
+        logger.info(
+            "Exported styled HTML report -> metrics/metrics_tables.html"
+        )
 
 
 # =============================================================================
