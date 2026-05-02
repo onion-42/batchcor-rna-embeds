@@ -195,3 +195,6 @@ references/harmony_backtrack.ipynb
 
 # data folder
 notebooks/data/
+
+# Claude folder
+.claude/
