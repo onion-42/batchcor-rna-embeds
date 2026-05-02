@@ -1,0 +1,20 @@
+# Normalize text files to LF in the repo, allow native EOL in working tree.
+# Fixes Windows "modified" ghost status caused by autocrlf.
+* text=auto eol=lf
+
+# Binary assets — never touch
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.pdf        binary
+*.npy        binary
+*.npz        binary
+*.h5         binary
+*.h5ad       binary
+*.zarr       binary
+*.pt         binary
+*.bin        binary
+*.parquet    binary
+
+# Notebooks: keep as-is, don't normalize
+*.ipynb      -text
