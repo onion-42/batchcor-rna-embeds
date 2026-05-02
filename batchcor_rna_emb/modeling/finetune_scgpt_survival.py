@@ -50,6 +50,8 @@ Falls back gracefully when CUDA is absent (CPU is still functional, just slow).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import gc
 import json
 import os
 import sys
@@ -136,6 +138,7 @@ SEED: int = 42
 class FineTuneConfig:
     epochs: int = 30
     batch_size: int = 32
+    cox_batch: int = 64
     lr: float = 5e-5
     weight_decay: float = 1e-4
     unfreeze_last: int = 2
@@ -431,11 +434,14 @@ def _extract_survival(adata: ad.AnnData) -> tuple[np.ndarray, np.ndarray, np.nda
     """Return (mask, time, event) extracted from common OS/PFS columns."""
     obs = adata.obs
     time_candidates = [
-        "PFS_DAYS", "OS_DAYS", "pfs_days", "os_days", "PFS", "OS",
+        "PFS", "OS", "PFS_DAYS", "OS_DAYS",
+        "pfs", "os", "pfs_days", "os_days",
     ]
     event_candidates = [
-        "PFS_EVENT", "OS_EVENT", "pfs_event", "os_event",
+        "PFS_FLAG", "OS_FLAG",
+        "PFS_EVENT", "OS_EVENT",
         "PFS_STATUS", "OS_STATUS",
+        "pfs_flag", "os_flag", "pfs_event", "os_event",
     ]
     time_col = next((c for c in time_candidates if c in obs.columns), None)
     event_col = next((c for c in event_candidates if c in obs.columns), None)
@@ -481,20 +487,29 @@ def _forward_chunked(
     """Forward N samples in chunks to avoid VRAM blow-up; returns (risk, cls)."""
     risks: list[torch.Tensor] = []
     cls_list: list[torch.Tensor] = []
-    autocast_ctx = torch.amp.autocast(
-        device_type=device.type, dtype=torch.float16, enabled=use_amp
-    )
+    use_autocast = use_amp and device.type == "cuda"
     for s in range(0, g.size(0), chunk):
-        gc = g[s : s + chunk].to(device, non_blocking=True)
-        ec = e[s : s + chunk].to(device, non_blocking=True)
-        mc = m[s : s + chunk].to(device, non_blocking=True)
+        g_b = g[s : s + chunk].to(device, non_blocking=True)
+        e_b = e[s : s + chunk].to(device, non_blocking=True)
+        m_b = m[s : s + chunk].to(device, non_blocking=True)
         if train:
-            with autocast_ctx:
-                r, c = model(gc, ec, mc)
+            if use_autocast:
+                with torch.amp.autocast(
+                    device_type=device.type, dtype=torch.float16
+                ):
+                    r, c = model(g_b, e_b, m_b)
+            else:
+                r, c = model(g_b, e_b, m_b)
         else:
-            with torch.no_grad(), autocast_ctx:
-                r, c = model(gc, ec, mc)
-        risks.append(r)
+            with torch.no_grad():
+                if use_autocast:
+                    with torch.amp.autocast(
+                        device_type=device.type, dtype=torch.float16
+                    ):
+                        r, c = model(g_b, e_b, m_b)
+                else:
+                    r, c = model(g_b, e_b, m_b)
+        risks.append(r.detach() if not train else r)
         cls_list.append(c.float().detach().cpu())
     return torch.cat(risks, dim=0), torch.cat(cls_list, dim=0)
 
@@ -544,48 +559,75 @@ def _train_one_fold(
 
     n_train = g_tr.size(0)
     micro = cfg.batch_size
+    cox_batch = min(cfg.cox_batch, n_train)
+    n_steps = max(1, n_train // cox_batch)
 
     logger.info(
         f"[fold {fold}] n_train={n_train} n_val={g_va.size(0)} "
-        f"events_train={int(events[tr_idx].sum())}"
+        f"events_train={int(events[tr_idx].sum())} | "
+        f"cox_batch={cox_batch} grad_steps/epoch={n_steps}"
     )
 
+    rng = np.random.default_rng(SEED + fold)
+
+    use_autocast = cfg.use_amp and device.type == "cuda"
     for ep in range(1, cfg.epochs + 1):
         model.train()
-        opt.zero_grad(set_to_none=True)
 
-        risks_chunks: list[torch.Tensor] = []
-        autocast_ctx = torch.amp.autocast(
-            device_type=device.type, dtype=torch.float16, enabled=cfg.use_amp
-        )
-        for s in range(0, n_train, micro):
-            gc = g_tr[s : s + micro].to(device, non_blocking=True)
-            ec = e_tr[s : s + micro].to(device, non_blocking=True)
-            mc = m_tr[s : s + micro].to(device, non_blocking=True)
-            with autocast_ctx:
-                r, _ = model(gc, ec, mc)
-            risks_chunks.append(r)
-        risks = torch.cat(risks_chunks, dim=0)
-
-        with autocast_ctx:
-            loss = cox_nll_loss(risks, times_t, events_t)
-
-        if cfg.use_amp and device.type == "cuda":
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                cfg.grad_clip,
-            )
-            scaler.step(opt)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                cfg.grad_clip,
-            )
-            opt.step()
+        def _autocast() -> contextlib.AbstractContextManager:
+            if use_autocast:
+                return torch.amp.autocast(
+                    device_type=device.type, dtype=torch.float16
+                )
+            return contextlib.nullcontext()
+        # Shuffle local training indices once per epoch and slice into
+        # `cox_batch`-sized risk-sets.  Each step computes a full-graph
+        # Cox loss on its risk-set, runs backward, and zeroes grads --
+        # this caps activation memory regardless of n_train.
+        perm = rng.permutation(n_train)
+        last_loss: float = float("nan")
+        for step in range(n_steps):
+            sel = perm[step * cox_batch : (step + 1) * cox_batch]
+            opt.zero_grad(set_to_none=True)
+            risks_chunks: list[torch.Tensor] = []
+            for s in range(0, len(sel), micro):
+                idxs = sel[s : s + micro]
+                g_b = g_tr[idxs].to(device, non_blocking=True)
+                e_b = e_tr[idxs].to(device, non_blocking=True)
+                m_b = m_tr[idxs].to(device, non_blocking=True)
+                with _autocast():
+                    r, _ = model(g_b, e_b, m_b)
+                risks_chunks.append(r)
+            risks = torch.cat(risks_chunks, dim=0)
+            t_step = times_t[torch.from_numpy(sel).to(device)]
+            e_step = events_t[torch.from_numpy(sel).to(device)]
+            with _autocast():
+                loss = cox_nll_loss(risks, t_step, e_step)
+            last_loss = float(loss.detach().cpu())
+            if cfg.use_amp and device.type == "cuda":
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    cfg.grad_clip,
+                )
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    cfg.grad_clip,
+                )
+                opt.step()
+            del risks, risks_chunks
+            if (step + 1) % max(1, n_steps // 4) == 0 or step == 0:
+                logger.info(
+                    f"[fold {fold}] ep {ep} step {step + 1}/{n_steps} "
+                    f"loss={last_loss:.4f}"
+                )
+        loss_value = last_loss
+        gc.collect()
 
         if ep > cfg.warmup_epochs:
             sched.step()
@@ -600,7 +642,7 @@ def _train_one_fold(
                 events[va_idx].astype(bool), times[va_idx], risk_va_np
             )[0]
         )
-        train_loss_hist.append(float(loss.detach().cpu()))
+        train_loss_hist.append(loss_value)
         val_cidx_hist.append(cidx)
 
         if cidx > best_cidx + 1e-4:
@@ -612,7 +654,7 @@ def _train_one_fold(
 
         logger.info(
             f"[fold {fold}] ep {ep:>3d} | "
-            f"loss={float(loss.detach().cpu()):.4f} | "
+            f"loss={loss_value:.4f} | "
             f"val C-idx={cidx:.4f} (best {best_cidx:.4f}@ep{best_epoch})"
         )
 
@@ -676,50 +718,69 @@ def _train_full(
     times_t = torch.from_numpy(times.astype(np.float32)).to(device)
     events_t = torch.from_numpy(events.astype(np.float32)).to(device)
     micro = cfg.batch_size
+    n_full = g.size(0)
+    cox_batch = min(cfg.cox_batch, n_full)
+    n_steps = max(1, n_full // cox_batch)
 
-    autocast_ctx = torch.amp.autocast(
-        device_type=device.type, dtype=torch.float16, enabled=cfg.use_amp
-    )
+    use_autocast = cfg.use_amp and device.type == "cuda"
+
+    def _autocast() -> contextlib.AbstractContextManager:
+        if use_autocast:
+            return torch.amp.autocast(
+                device_type=device.type, dtype=torch.float16
+            )
+        return contextlib.nullcontext()
 
     logger.info(
-        f"[final] training on full TRAIN n={g.size(0)} for {epochs} epochs"
+        f"[final] training on full TRAIN n={n_full} for {epochs} epochs "
+        f"| cox_batch={cox_batch} grad_steps/epoch={n_steps}"
     )
+    rng = np.random.default_rng(SEED + 999)
     for ep in range(1, epochs + 1):
         model.train()
-        opt.zero_grad(set_to_none=True)
-        risks: list[torch.Tensor] = []
-        for s in range(0, g.size(0), micro):
-            gc = g[s : s + micro].to(device, non_blocking=True)
-            ec = e[s : s + micro].to(device, non_blocking=True)
-            mc = m[s : s + micro].to(device, non_blocking=True)
-            with autocast_ctx:
-                r, _ = model(gc, ec, mc)
-            risks.append(r)
-        with autocast_ctx:
-            loss = cox_nll_loss(torch.cat(risks, dim=0), times_t, events_t)
-
-        if cfg.use_amp and device.type == "cuda":
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                cfg.grad_clip,
-            )
-            scaler.step(opt)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                cfg.grad_clip,
-            )
-            opt.step()
+        perm = rng.permutation(n_full)
+        last_loss: float = float("nan")
+        for step in range(n_steps):
+            sel = perm[step * cox_batch : (step + 1) * cox_batch]
+            opt.zero_grad(set_to_none=True)
+            risks: list[torch.Tensor] = []
+            for s in range(0, len(sel), micro):
+                idxs = sel[s : s + micro]
+                g_b = g[idxs].to(device, non_blocking=True)
+                e_b = e[idxs].to(device, non_blocking=True)
+                m_b = m[idxs].to(device, non_blocking=True)
+                with _autocast():
+                    r, _ = model(g_b, e_b, m_b)
+                risks.append(r)
+            risks_cat = torch.cat(risks, dim=0)
+            t_step = times_t[torch.from_numpy(sel).to(device)]
+            e_step = events_t[torch.from_numpy(sel).to(device)]
+            with _autocast():
+                loss = cox_nll_loss(risks_cat, t_step, e_step)
+            last_loss = float(loss.detach().cpu())
+            if cfg.use_amp and device.type == "cuda":
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    cfg.grad_clip,
+                )
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    cfg.grad_clip,
+                )
+                opt.step()
+            del risks, risks_cat
 
         if ep > cfg.warmup_epochs:
             sched.step()
         if ep % max(1, epochs // 6) == 0 or ep == epochs:
             logger.info(
-                f"[final] ep {ep:>3d}/{epochs} loss={float(loss.detach().cpu()):.4f}"
+                f"[final] ep {ep:>3d}/{epochs} loss={last_loss:.4f}"
             )
     return model
 
@@ -790,12 +851,26 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=32, dest="batch_size")
+    p.add_argument(
+        "--cox-batch", type=int, default=64, dest="cox_batch",
+        help=(
+            "Number of samples per Cox-loss gradient step. Bounds the size "
+            "of the autograd graph -- keep <= 256 on CPU to avoid OOM."
+        ),
+    )
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--weight-decay", type=float, default=1e-4, dest="weight_decay")
     p.add_argument("--unfreeze-last", type=int, default=2, dest="unfreeze_last")
     p.add_argument("--n-splits", type=int, default=5, dest="n_splits")
     p.add_argument("--head-hidden", type=int, default=128, dest="head_hidden")
     p.add_argument("--head-dropout", type=float, default=0.20, dest="head_dropout")
+    p.add_argument(
+        "--max-train-n", type=int, default=0, dest="max_train_n",
+        help=(
+            "If > 0, subsample TRAIN to this many patients (stratified by event) "
+            "before SFT. Useful for smoke-testing on slow CPUs."
+        ),
+    )
     p.add_argument("--no-amp", action="store_true", help="Disable mixed precision.")
     p.add_argument(
         "--no-h5ad-write",
@@ -810,6 +885,7 @@ def main() -> None:
     cfg = FineTuneConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
+        cox_batch=args.cox_batch,
         lr=args.lr,
         weight_decay=args.weight_decay,
         unfreeze_last=args.unfreeze_last,
@@ -821,6 +897,15 @@ def main() -> None:
 
     torch.manual_seed(SEED)
     np.random.seed(SEED)
+
+    # Multi-threaded MKL on torch >= 2.4 + this scGPT build occasionally
+    # access-violates inside the encoder forward pass on Windows. Cap at
+    # one thread by default; let the user override with NUM_THREADS=N.
+    n_threads = int(os.environ.get("NUM_THREADS", "1"))
+    torch.set_num_threads(n_threads)
+    os.environ.setdefault("OMP_NUM_THREADS", str(n_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(n_threads))
+    logger.info(f"torch.num_threads = {torch.get_num_threads()}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | AMP: {cfg.use_amp and device.type == 'cuda'}")
@@ -863,6 +948,24 @@ def main() -> None:
         f"TRAIN survival: n={len(times)} | events={int(events.sum())} "
         f"| censored={int((1 - events).sum())}"
     )
+
+    if args.max_train_n > 0 and args.max_train_n < len(times):
+        # Stratified subsample by event indicator so the Cox loss has signal.
+        rng_sub = np.random.default_rng(SEED)
+        idx_pos = np.where(events > 0.5)[0]
+        idx_neg = np.where(events <= 0.5)[0]
+        n_pos = int(args.max_train_n * len(idx_pos) / len(times))
+        n_neg = args.max_train_n - n_pos
+        keep_pos = rng_sub.choice(idx_pos, size=min(n_pos, len(idx_pos)), replace=False)
+        keep_neg = rng_sub.choice(idx_neg, size=min(n_neg, len(idx_neg)), replace=False)
+        keep = np.sort(np.concatenate([keep_pos, keep_neg]))
+        train_surv = train_surv[keep].copy()
+        times = times[keep]
+        events = events[keep]
+        logger.info(
+            f"Subsampled TRAIN to n={len(times)} (events={int(events.sum())}, "
+            f"censored={int((1 - events).sum())}) for SFT smoke run"
+        )
 
     g, e, m = _materialise_tensors(train_surv, gene_order, vocab)
 
