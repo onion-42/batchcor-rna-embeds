@@ -149,6 +149,7 @@ PUB_FILES: dict[str, Path] = {
 SCGPT_KEY    : str = "scGPT_embedding"
 CAE_KEY      : str = "cAE_embedding"
 CAE_OOD_KEY  : str = "cAE_embedding_OOD"
+SCGPT_FT_KEY : str = "scGPT_finetuned_embedding"  # written by finetune_scgpt_survival.py
 
 # CV
 N_SPLITS_CLF  : int = 5
@@ -1140,10 +1141,19 @@ def run_ood_stress_test(
     logger.info("=" * 70)
 
     rows: list[dict] = []
-    for tr_emb_key, pub_emb_key, emb_label in [
+    ood_pairs: list[tuple[str, str, str]] = [
         (CAE_KEY,   CAE_OOD_KEY, "cAE Corrected (v3) + Clinical"),
         (SCGPT_KEY, SCGPT_KEY,   "Raw scGPT + Clinical"),
-    ]:
+    ]
+    if SCGPT_FT_KEY in train_ad.obsm:
+        if any(SCGPT_FT_KEY in pa.obsm for pa in pub_ads.values()):
+            ood_pairs.append(
+                (SCGPT_FT_KEY, SCGPT_FT_KEY, "scGPT Fine-tuned + Clinical")
+            )
+            logger.info(
+                f"Adding OOD line for obsm['{SCGPT_FT_KEY}'] (TRAIN + matching PUBs)"
+            )
+    for tr_emb_key, pub_emb_key, emb_label in ood_pairs:
         resp_col = detect_response_column(train_ad.obs)
         if resp_col is None:
             logger.warning(f"[{emb_label}] no response column on TRAIN -> skip")
@@ -1593,6 +1603,16 @@ def main() -> None:
         (SCGPT_KEY, SURVIVAL_PCA_DIM, f"Raw scGPT-PCA{SURVIVAL_PCA_DIM} + Clinical"),
         (CAE_KEY,   None,             "cAE-full + Clinical"),
     ]
+    if SCGPT_FT_KEY in train_ad.obsm:
+        feature_sets.extend([
+            (SCGPT_FT_KEY, SURVIVAL_PCA_DIM,
+             f"scGPT-FT-PCA{SURVIVAL_PCA_DIM} + Clinical"),
+            (SCGPT_FT_KEY, None, "scGPT-FT-full + Clinical"),
+        ])
+        logger.info(
+            f"Detected obsm['{SCGPT_FT_KEY}'] -> SFT embeddings will be "
+            "benchmarked alongside cAE / raw scGPT."
+        )
     last_fitted_global: dict | None = None
     last_X_train_global: np.ndarray | None = None
     last_y_train_global: np.ndarray | None = None
