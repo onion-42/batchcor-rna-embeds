@@ -113,6 +113,7 @@ batchcor-rna-embeds/
 │
 ├── metrics_csv/                    ← all CSV + batch_correction_metrics.json
 │   ├── v4_survival_results.csv
+│   ├── v4_cindex_survival_matrix.csv   ← wide table: feature set × survival model (5-fold CV mean C-index)
 │   ├── v4_classification_results.csv
 │   ├── v4_ood_pub_results.csv
 │   ├── v4_final_leaderboard.csv
