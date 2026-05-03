@@ -177,5 +177,11 @@ cython_debug/
 .vscode/
 .idea/
 
-#internal notebook
+# internal notebook
 references/harmony_backtrack.ipynb
+
+# notebook-local data (never commit)
+notebooks/data/
+
+# local Claude / agent metadata
+.claude/
