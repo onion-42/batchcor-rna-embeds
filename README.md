@@ -14,13 +14,13 @@ and binary Response) on multi-cohort immunotherapy data.
 | Task | Best feature set | Best model | Score |
 |---|---|---|---|
 | 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6616 ± 0.012** |
-| 5-fold CV ROC-AUC (Response) | cAE-PCA32 + Clinical | Stacked ensemble | **0.6302 ± 0.023** |
-| OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | cAE + Clinical | LightGBM | **0.9612** |
+| 5-fold CV ROC-AUC (Response) | cAE-PCA32 + Clinical | Stacked ensemble | **0.6302 ± 0.0227** |
+| OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | Raw scGPT + Clinical | LightGBM | **0.8775** |
 
-The cAE-corrected embeddings beat raw scGPT on every survival model and
-on two of the three out-of-distribution PUB cohorts. The model
-generalises near-perfectly (AUC = 0.96) to a fully held-out ccRCC
-immunotherapy cohort.
+The cAE-corrected embeddings beat raw scGPT on every survival model in
+internal CV. The latest OOD export evaluates **Raw scGPT + Clinical**
+only (public cohorts ship without `cAE_embedding_OOD`, so the cAE OOD
+branch is skipped); on held-out ccRCC ICI, LightGBM reaches **AUC ≈ 0.88**.
 
 **Two ways to view the metrics:**
 
