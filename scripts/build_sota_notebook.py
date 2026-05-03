@@ -56,8 +56,11 @@ md(
 # BG7 -- SOTA analytics notebook
 
 Self-contained companion to `metrics/metrics_tables.html`. **All figures
-render inline** -- no PNG/PDF side-files, no external assets. Re-run
-end-to-end from a fresh clone after the v4 pipeline has finished.
+render inline** (matplotlib only; no PNG/PDF side-files). Re-run
+end-to-end after `v4_definitive_pipeline` has refreshed `metrics_csv/`.
+
+Figures use a white grid, white marker edges on dense UMAPs, and the
+seaborn **deep** palette for categorical contrast.
 
 Sections:
 
@@ -99,31 +102,39 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
-from matplotlib.colors import LinearSegmentedColormap
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- Plot styling: large, legible, presentation-grade --------------------
+# --- Plot styling: publication-friendly, high contrast --------------------
+sns.set_theme(
+    context="notebook",
+    style="ticks",
+    font_scale=1.05,
+    rc={"axes.grid": True, "grid.alpha": 0.22, "grid.linewidth": 0.7},
+)
 plt.rcParams.update({
-    "figure.figsize": (12, 7),
-    "figure.dpi": 110,
-    "savefig.dpi": 140,
+    "figure.figsize": (12, 7.2),
+    "figure.dpi": 115,
+    "figure.facecolor": "white",
+    "axes.facecolor": "#fafafa",
+    "savefig.dpi": 160,
+    "savefig.bbox": "tight",
     "font.size": 14,
     "axes.titlesize": 17,
     "axes.titleweight": "bold",
     "axes.labelsize": 14,
+    "axes.labelweight": "medium",
     "xtick.labelsize": 12,
     "ytick.labelsize": 12,
-    "legend.fontsize": 12,
+    "legend.fontsize": 11,
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.linewidth": 1.1,
-    "axes.grid": True,
-    "grid.alpha": 0.25,
-    "grid.linewidth": 0.7,
+    "axes.linewidth": 1.15,
+    "lines.linewidth": 2.25,
+    "lines.markersize": 6,
 })
-sns.set_palette("tab10")
+sns.set_palette("deep")
 
 # --- Paths ---------------------------------------------------------------
 NB_DIR = Path.cwd()
@@ -245,8 +256,11 @@ of "Simpson's paradox" applied to RNA batches."""
 
 code(
     '''\
-def _scatter_by_cat(ax, xy, labels, title, palette=None, alpha=0.75, s=14):
-    ax.set_title(title)
+def _scatter_by_cat(
+    ax, xy, labels, title, palette=None, alpha=0.82, s=18,
+    show_legend=True, legend_fontsize=10,
+):
+    ax.set_title(title, pad=10)
     if xy is None:
         ax.text(0.5, 0.5, "(embedding not available)",
                 ha="center", va="center", transform=ax.transAxes,
@@ -255,14 +269,22 @@ def _scatter_by_cat(ax, xy, labels, title, palette=None, alpha=0.75, s=14):
         return
     cats = pd.Series(labels).astype(str)
     uniq = sorted(cats.dropna().unique())
-    palette = palette or sns.color_palette("tab10", len(uniq))
+    if palette is None:
+        palette = sns.color_palette("husl", len(uniq)) if len(uniq) > 10 else sns.color_palette("deep", len(uniq))
     for i, cat in enumerate(uniq):
         mask = (cats == cat).values & ~np.isnan(xy).any(axis=1)
-        ax.scatter(xy[mask, 0], xy[mask, 1],
-                   s=s, alpha=alpha, c=[palette[i % len(palette)]],
-                   label=f"{cat} (n={int(mask.sum())})", linewidths=0)
+        ax.scatter(
+            xy[mask, 0], xy[mask, 1],
+            s=s, alpha=alpha, c=[palette[i % len(palette)]],
+            label=f"{cat} (n={int(mask.sum())})",
+            edgecolors="white", linewidths=0.35, rasterized=True,
+        )
     ax.set_xlabel("UMAP-1"); ax.set_ylabel("UMAP-2")
-    ax.legend(loc="best", frameon=True, fontsize=9, markerscale=1.5)
+    if show_legend:
+        ax.legend(
+            loc="best", frameon=True, fontsize=legend_fontsize, markerscale=1.35,
+            framealpha=0.95, fancybox=True, shadow=False,
+        )
 
 cohort = train.obs["Cohort"].astype(str) if "Cohort" in train.obs else pd.Series(["?"] * train.n_obs)
 
@@ -276,7 +298,7 @@ if UMAP_FT is not None:
     _scatter_by_cat(axes[2], UMAP_FT, cohort, "Fine-tuned scGPT -- coloured by cohort")
 
 fig.suptitle(f"Batch-correction effect on TRAIN  (N = {train.n_obs:,})",
-             fontsize=18, fontweight="bold", y=1.01)
+             fontsize=18, fontweight="bold", y=1.02)
 fig.tight_layout()
 plt.show()
 '''
@@ -378,11 +400,13 @@ for ax, (name, candidates) in zip(axes.flat, panels):
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(name)
         continue
-    _scatter_by_cat(ax, UMAP_CAE, train.obs[col].astype(str),
-                    f"cAE UMAP -- {col}", s=12)
+    _scatter_by_cat(
+        ax, UMAP_CAE, train.obs[col].astype(str),
+        f"cAE UMAP -- {col}", s=13, legend_fontsize=7,
+    )
 
 fig.suptitle("Clinical-covariate overlays on the cAE-corrected UMAP",
-             fontsize=20, fontweight="bold", y=1.005)
+             fontsize=20, fontweight="bold", y=1.02)
 fig.tight_layout()
 plt.show()
 '''
@@ -410,9 +434,11 @@ if kass_cols and UMAP_CAE is not None:
     for ax, col in zip(axes.flat, top4):
         vals = pd.to_numeric(train.obs[col], errors="coerce").to_numpy()
         valid = ~np.isnan(vals) & ~np.isnan(UMAP_CAE).any(axis=1)
-        sc1 = ax.scatter(UMAP_CAE[valid, 0], UMAP_CAE[valid, 1],
-                         c=vals[valid], cmap="viridis", s=14,
-                         alpha=0.85, linewidths=0)
+        sc1 = ax.scatter(
+            UMAP_CAE[valid, 0], UMAP_CAE[valid, 1],
+            c=vals[valid], cmap="mako", s=20,
+            alpha=0.88, linewidths=0.25, edgecolors="white", rasterized=True,
+        )
         ax.set_title(f"cAE UMAP -- {col} (var={obs_num[col].var():.2g})")
         ax.set_xlabel("UMAP-1"); ax.set_ylabel("UMAP-2")
         cb = fig.colorbar(sc1, ax=ax, fraction=0.045, pad=0.02)
@@ -511,11 +537,11 @@ def km_panel(ax, time, event, group, max_groups=8, title=""):
         ax.text(0.5, 0.5, "<2 strata", ha="center", va="center",
                 transform=ax.transAxes); return
 
-    palette = sns.color_palette("tab10", g.nunique())
+    palette = sns.color_palette("colorblind", max(g.nunique(), 3))
     for i, lvl in enumerate(sorted(g.unique())):
         m = g == lvl
         kmf = KaplanMeierFitter().fit(t[m], event_observed=e[m], label=f"{lvl} (n={int(m.sum())})")
-        kmf.plot_survival_function(ax=ax, ci_show=False, color=palette[i], lw=2.4)
+        kmf.plot_survival_function(ax=ax, ci_show=False, color=palette[i % len(palette)], lw=2.8)
 
     try:
         lr = multivariate_logrank_test(t, g, e)
@@ -800,10 +826,10 @@ md("### 6.1  ROC curves on each PUB cohort")
 code(
     '''\
 fig, ax = plt.subplots(figsize=(11, 8))
-ax.plot([0, 1], [0, 1], ls="--", color="#999", lw=1.5, label="chance")
+ax.plot([0, 1], [0, 1], ls="--", color="#999", lw=1.6, label="chance", zorder=0)
 palette = sns.color_palette("Set2", len(ood_curves))
 for c, color in zip(ood_curves, palette):
-    ax.plot(c["fpr"], c["tpr"], lw=3, color=color,
+    ax.plot(c["fpr"], c["tpr"], lw=3.2, color=color,
             label=f"{c['name']}  AUC = {c['auc']:.3f}  (n={c['n']}, pos={c['n_pos']})")
     ax.fill_between(c["fpr"], 0, c["tpr"], color=color, alpha=0.10)
 ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
@@ -821,7 +847,7 @@ code(
 fig, ax = plt.subplots(figsize=(11, 8))
 palette = sns.color_palette("Set2", len(ood_curves))
 for c, color in zip(ood_curves, palette):
-    ax.plot(c["rec"], c["prec"], lw=3, color=color,
+    ax.plot(c["rec"], c["prec"], lw=3.2, color=color,
             label=f"{c['name']}  AP = {c['ap']:.3f}  (pos rate {c['n_pos']/c['n']:.2f})")
     ax.fill_between(c["rec"], 0, c["prec"], color=color, alpha=0.10)
 ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
@@ -917,9 +943,12 @@ if xgb_model is not None and UMAP_CAE is not None:
     valid = ~np.isnan(UMAP_CAE).any(axis=1)
     for i, lvl in enumerate(["Low risk", "Medium risk", "High risk"]):
         m = np.asarray(tert == lvl) & valid
-        ax.scatter(UMAP_CAE[m, 0], UMAP_CAE[m, 1],
-                   c=[palette[i]], s=18, alpha=0.78,
-                   label=f"{lvl}  (n={int(m.sum())})", linewidths=0)
+        ax.scatter(
+            UMAP_CAE[m, 0], UMAP_CAE[m, 1],
+            c=[palette[i]], s=22, alpha=0.84,
+            label=f"{lvl}  (n={int(m.sum())})",
+            edgecolors="white", linewidths=0.35, rasterized=True,
+        )
     ax.set_xlabel("UMAP-1"); ax.set_ylabel("UMAP-2")
     ax.set_title("cAE UMAP coloured by predicted risk tertile (XGBoost on cAE+Clinical)")
     ax.legend(frameon=True, loc="best")
