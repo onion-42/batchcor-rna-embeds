@@ -877,11 +877,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Don't mutate the h5ad files; only write to embeddings/ folder.",
     )
+    p.add_argument(
+        "--n-hvg", type=int, default=0, dest="n_hvg",
+        help=(
+            "Override the shared HVG count (default: scgpt_embeddings.N_HVG, "
+            "currently 1200). Smaller HVG = quadratically faster transformer "
+            "forward at the cost of expressive power -- 600 is a sane CPU-only "
+            "compromise."
+        ),
+    )
+    p.add_argument(
+        "--warmup-epochs", type=int, default=-1, dest="warmup_epochs",
+        help=(
+            "Number of LR warmup epochs (default: 2 for >=4-epoch runs, else "
+            "min(epochs-1, 2))."
+        ),
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.warmup_epochs >= 0:
+        warmup_epochs = args.warmup_epochs
+    else:
+        warmup_epochs = 2 if args.epochs >= 4 else max(0, args.epochs - 1)
     cfg = FineTuneConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -892,6 +912,7 @@ def main() -> None:
         n_splits=args.n_splits,
         head_hidden=args.head_hidden,
         head_dropout=args.head_dropout,
+        warmup_epochs=warmup_epochs,
         use_amp=not args.no_amp,
     )
 
@@ -937,7 +958,8 @@ def main() -> None:
     vocab_genes = frozenset(
         g for g in vocab.get_stoi() if not g.startswith("<")
     )
-    gene_order = _shared_hvg_geneset(TRAIN_H5AD, N_HVG, vocab_genes)
+    n_hvg_use = args.n_hvg if args.n_hvg > 0 else N_HVG
+    gene_order = _shared_hvg_geneset(TRAIN_H5AD, n_hvg_use, vocab_genes)
 
     train_ad = sc.read_h5ad(str(TRAIN_H5AD))
     mask, t_full, e_full = _extract_survival(train_ad)
