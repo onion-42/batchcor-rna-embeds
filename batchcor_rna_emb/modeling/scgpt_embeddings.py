@@ -35,7 +35,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # =============================================================================
 # THIRD-PARTY  — hard imports; no silent fallbacks
@@ -76,7 +76,10 @@ SCGPT_MODEL_DIR : Path = Path(
     )
 ).resolve()
 
-BATCH_SIZE : int = 1  # Further reduced for fastest CPU processing
+# Batch inference: 1 is extremely slow (one forward per patient). Use 32 on CPU
+# and 64 on CUDA unless overridden via process_all_folders(batch_size=...).
+_CUDA_AVAILABLE = torch.cuda.is_available()
+BATCH_SIZE: int = 64 if _CUDA_AVAILABLE else 32
 N_HVG      : int = 1_200   # hard cap matching scGPT pretraining sequence length
 N_BINS     : int = 51      # expression discretisation levels (matches pretraining)
 PAD_TOKEN  : str = "<pad>"
@@ -131,8 +134,16 @@ class ScGPTInferenceEngine:
             )
         self.vocab: GeneVocab = GeneVocab.from_file(str(vocab_path))
 
-        # Special tokens should already be in the vocab from pretraining.
-        # Just use them as-is.
+        # Ensure special tokens exist (some checkpoints omit them; crash is worse
+        # than a loud append + warning).
+        for tok in (PAD_TOKEN, CLS_TOKEN, EOS_TOKEN):
+            if tok not in self.vocab:
+                logger.warning(
+                    f"Special token {tok!r} missing from vocab — appending. "
+                    "Verify checkpoint compatibility."
+                )
+                self.vocab.append_token(tok)
+
         self.pad_id: int = self.vocab[PAD_TOKEN]
         self.cls_id: int = self.vocab[CLS_TOKEN]
 
@@ -214,26 +225,22 @@ class ScGPTInferenceEngine:
 # =============================================================================
 
 def intersect_with_vocab(
-    adata  : sc.AnnData,
-    engine : ScGPTInferenceEngine,
-    n_hvg  : int = N_HVG,
+    adata       : sc.AnnData,
+    engine      : ScGPTInferenceEngine,
+    n_hvg       : int = N_HVG,
+    raw_counts  : Optional[np.ndarray] = None,
 ) -> Tuple[sc.AnnData, np.ndarray]:
     """
     1. Keep only genes present in the scGPT vocabulary.
-    2. If >n_hvg genes remain, select the top HVGs (seurat_v3 dispersion).
-    3. Return the filtered AnnData and an ordered integer token-id array.
-
-    Raises
-    ------
-    ValueError
-        If zero genes overlap — this almost always means var_names contain
-        Ensembl IDs (ENSG00000...) rather than HGNC symbols (TP53, EGFR…).
-        Fix: adata.var_names = adata.var["gene_name"]
+    2. If >n_hvg genes remain, select HVGs: ``seurat_v3`` on raw counts when
+       ``raw_counts`` is provided (correct for counts); otherwise ``seurat``
+       on the (log-normalised) ``adata.X``.
+    3. Return filtered AnnData and token-id array aligned with ``adata.var_names``.
     """
     overlap = [g for g in adata.var_names if g in engine.vocab_gene_set]
     logger.info(
         f"Vocabulary match: {len(overlap):,} / {adata.n_vars:,} genes "
-        f"({100*len(overlap)/adata.n_vars:.1f}%)"
+        f"({100 * len(overlap) / max(adata.n_vars, 1):.1f}%)"
     )
 
     if len(overlap) == 0:
@@ -244,19 +251,54 @@ def intersect_with_vocab(
             "Fix: adata.var_names = adata.var['gene_name']  (or equivalent column)"
         )
 
+    n_vars_full = adata.n_vars
+    col_ix = [adata.var_names.get_loc(g) for g in overlap]
+
+    if raw_counts is not None:
+        if raw_counts.shape[0] != adata.n_obs:
+            raise ValueError(
+                f"raw_counts rows {raw_counts.shape[0]} != n_obs {adata.n_obs}"
+            )
+        if raw_counts.shape[1] != n_vars_full:
+            raise ValueError(
+                f"raw_counts cols {raw_counts.shape[1]} != adata n_vars {n_vars_full}"
+            )
+
     adata = adata[:, overlap].copy()
 
     if adata.n_vars > n_hvg:
-        logger.info(
-            f"Selecting top {n_hvg} HVGs from {adata.n_vars} matched genes …"
-        )
-        sc.pp.highly_variable_genes(
-            adata, n_top_genes=n_hvg, flavor="seurat_v3"
-        )
-        adata = adata[:, adata.var["highly_variable"]].copy()
+        if raw_counts is not None:
+            import scipy.sparse as sp
+
+            raw_overlap = raw_counts[:, col_ix]
+            if sp.issparse(raw_overlap):
+                raw_overlap = raw_overlap.toarray()
+            hvg_adata = sc.AnnData(
+                X=raw_overlap.astype(np.float32),
+                var=adata.var.copy(),
+                obs=adata.obs.copy(),
+            )
+            logger.info(
+                f"Selecting top {n_hvg} HVGs with seurat_v3 on raw counts "
+                f"from {adata.n_vars} vocab-matched genes …"
+            )
+            sc.pp.highly_variable_genes(
+                hvg_adata, n_top_genes=n_hvg, flavor="seurat_v3"
+            )
+            hvg_mask = hvg_adata.var["highly_variable"].values
+        else:
+            logger.warning(
+                "No raw_counts for HVG selection — using flavor='seurat' on "
+                "log-normalised X (seurat_v3 needs counts)."
+            )
+            sc.pp.highly_variable_genes(
+                adata, n_top_genes=n_hvg, flavor="seurat"
+            )
+            hvg_mask = adata.var["highly_variable"].values
+
+        adata = adata[:, hvg_mask].copy()
         logger.info(f"HVG selection complete: {adata.n_vars} genes retained.")
 
-    # Build ordered integer token-id array aligned with adata.var_names
     gene_ids = np.array(
         [engine.vocab[g] for g in adata.var_names], dtype=np.int64
     )
@@ -267,15 +309,15 @@ def intersect_with_vocab(
 # STEP 3 — PREPROCESSING
 # =============================================================================
 
-def preprocess_adata(adata: sc.AnnData) -> sc.AnnData:
+def preprocess_adata(adata: sc.AnnData) -> Tuple[sc.AnnData, Optional[np.ndarray]]:
     """
-    Detect whether the matrix is raw and apply normalize_total + log1p if so.
+    Detect raw vs log-normalised data; apply ``normalize_total`` + ``log1p`` if raw.
 
-    Detection heuristic
-    -------------------
-    Sample max across the first 50 rows.  If it exceeds 14 (≈ log1p(1.2e6))
-    the matrix is almost certainly raw TPM or count data.  Log-normalised
-    matrices will always be well below this threshold.
+    Returns
+    -------
+    (adata, raw_counts)
+        ``raw_counts`` is a dense copy of ``.X`` **before** normalisation when raw
+        data was detected (for ``seurat_v3`` HVG selection). Otherwise ``None``.
     """
     import scipy.sparse as sp
 
@@ -286,16 +328,18 @@ def preprocess_adata(adata: sc.AnnData) -> sc.AnnData:
     if sample_max > 14.0:
         logger.info(
             f"max(X[:50]) = {sample_max:.2f} → raw data detected. "
-            "Applying sc.pp.normalize_total(1e4) then sc.pp.log1p."
+            "Saving raw counts, then normalize_total(1e4) + log1p."
         )
+        raw_counts = X.toarray() if sp.issparse(X) else np.asarray(X, dtype=np.float32)
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
-    else:
-        logger.info(
-            f"max(X[:50]) = {sample_max:.4f} → data appears log-normalised already. "
-            "Skipping normalisation."
-        )
-    return adata
+        return adata, raw_counts
+
+    logger.info(
+        f"max(X[:50]) = {sample_max:.4f} → data appears log-normalised already. "
+        "Skipping normalisation (no raw counts for seurat_v3 HVG)."
+    )
+    return adata, None
 
 
 # =============================================================================
@@ -361,12 +405,13 @@ def build_model_inputs(
     n_cells, n_genes = expr_binned.shape
     seq_len          = n_genes + 1
 
-    gene_tokens  = torch.full((n_cells, seq_len), pad_id,    dtype=torch.long)
-    expr_values  = torch.full((n_cells, seq_len), PAD_VALUE, dtype=torch.float32)
-    key_pad_mask = torch.zeros((n_cells, seq_len),            dtype=torch.bool)  # all real
+    # Integer bin ids must be long tensors for scGPT's value encoder (nn.Embedding).
+    gene_tokens  = torch.full((n_cells, seq_len), pad_id, dtype=torch.long)
+    expr_values  = torch.full((n_cells, seq_len), PAD_VALUE, dtype=torch.long)
+    key_pad_mask = torch.zeros((n_cells, seq_len), dtype=torch.bool)
 
-    g_tensor = torch.from_numpy(gene_ids)     # (n_genes,)
-    b_tensor = torch.from_numpy(expr_binned)  # (n_cells, n_genes)
+    g_tensor = torch.from_numpy(gene_ids).long()
+    b_tensor = torch.from_numpy(expr_binned).long()
 
     # Position 0 — CLS
     # The model uses pad_id as the input token for the CLS position and
@@ -527,11 +572,13 @@ def transform_to_scgpt_embeddings(
     """
     import scipy.sparse as sp
 
-    # 1 — Preprocess
-    adata = preprocess_adata(adata)
+    # 1 — Preprocess (optional raw matrix for correct HVG on counts)
+    adata, raw_counts = preprocess_adata(adata)
 
     # 2 — Vocabulary match + HVG selection
-    adata, gene_ids = intersect_with_vocab(adata, engine, n_hvg=N_HVG)
+    adata, gene_ids = intersect_with_vocab(
+        adata, engine, n_hvg=N_HVG, raw_counts=raw_counts
+    )
 
     # 3 — Densify and bin
     X = adata.X
@@ -627,10 +674,8 @@ def process_single_folder(
     pooling     : str = "cls",
 ) -> None:
     """Process one cohort Zarr dataset and write .npy + patient-ID .csv."""
-    # Derive a clean cohort name from the folder stem
-    cohort_name = folder_path.name
-    for suffix in (".zarr", ".adata"):
-        cohort_name = cohort_name.replace(suffix, "")
+    # Safe suffix stripping (avoid str.replace corrupting in-folder ".adata" text)
+    cohort_name = folder_path.name.removesuffix(".zarr").removesuffix(".adata")
 
     logger.info(f"{'='*60}")
     logger.info(f"Cohort: {cohort_name}")

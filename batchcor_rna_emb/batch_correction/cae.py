@@ -327,6 +327,8 @@ def _make_one_hot(
     of silently indexing into the wrong column.
     """
     idx = np.asarray(batch_indices, dtype=np.int64)
+    if len(idx) == 0:
+        return torch.zeros(0, n_batches, dtype=torch.float32)
     if idx.min() < 0 or idx.max() >= n_batches:
         raise ValueError(
             f"batch_indices must be in [0, {n_batches - 1}]. "
@@ -335,6 +337,23 @@ def _make_one_hot(
     oh = torch.zeros(len(idx), n_batches, dtype=torch.float32)
     oh[torch.arange(len(idx)), torch.from_numpy(idx)] = 1.0
     return oh  # stays on CPU; moved per-batch in the training loop
+
+
+def _validate_batch_completeness(
+    batch_indices : np.ndarray,
+    n_batches     : int,
+) -> None:
+    """Every label in ``0 … n_batches-1`` must appear at least once in training."""
+    seen   = set(np.unique(batch_indices).tolist())
+    expect = set(range(n_batches))
+    absent = expect - seen
+    if absent:
+        raise ValueError(
+            f"Batch indices {sorted(absent)} never appear in training data "
+            f"but n_batches={n_batches} implies they should.\n"
+            "Pass explicit batch labels or set cfg.n_batches to the number of "
+            "cohorts actually present."
+        )
 
 
 def _build_dataloader(
@@ -379,27 +398,27 @@ class _EarlyStopping:
     """
     Monitors an Exponential Moving Average (EMA) of training loss.
 
-    Why EMA?
-    --------
-    Clinical cohorts can be tiny (30–200 patients).  With small batch sizes
-    the per-epoch loss is noisy.  The EMA smooths the trend so we stop only
-    when the *trend* genuinely plateaus, not on a transient noisy spike.
-
-    Why no validation split?
-    ------------------------
-    Withholding 10–20% of patients from a 50-patient cohort removes 5–10
-    data points — statistically costly.  EMA-based early stopping on train
-    loss is the established approach in clinical omics (e.g. scVI's default).
+    ``best_state`` is initialised from the untrained model so ``restore_best``
+    always reloads valid weights (even if the first epoch was the only
+    improvement).
     """
 
-    def __init__(self, patience: int, min_delta: float, alpha: float) -> None:
+    def __init__(
+        self,
+        patience  : int,
+        min_delta : float,
+        alpha     : float,
+        model     : nn.Module,
+    ) -> None:
         self.patience   = patience
         self.min_delta  = min_delta
         self.alpha      = alpha
         self.ema        : Optional[float] = None
         self.best_ema   : float           = float("inf")
         self.counter    : int             = 0
-        self.best_state : Optional[dict]  = None
+        self.best_state : dict[str, torch.Tensor] = {
+            k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+        }
 
     def update(self, loss: float, model: nn.Module) -> bool:
         """
@@ -428,11 +447,10 @@ class _EarlyStopping:
         return self.counter >= self.patience
 
     def restore_best(self, model: nn.Module) -> None:
-        if self.best_state is not None:
-            model.load_state_dict(self.best_state)
-            logger.info(
-                f"Best weights restored (best EMA loss = {self.best_ema:.6f})."
-            )
+        model.load_state_dict(self.best_state)
+        logger.info(
+            f"Best weights restored (best EMA loss = {self.best_ema:.6f})."
+        )
 
 
 # =============================================================================
@@ -479,17 +497,27 @@ def train_cae(
         )
 
     n_samples, emb_dim = embeddings.shape
-    n_batches           = int(batch_indices.max()) + 1
+    n_batches_inferred = int(batch_indices.max()) + 1
 
     # ── Config & device ───────────────────────────────────────────────────────
     if cfg is None:
-        cfg = CAEConfig(emb_dim=emb_dim, n_batches=n_batches)
-        logger.info(f"CAEConfig inferred: emb_dim={emb_dim}, n_batches={n_batches}")
+        cfg = CAEConfig(emb_dim=emb_dim, n_batches=n_batches_inferred)
+        logger.info(
+            f"CAEConfig inferred: emb_dim={emb_dim}, n_batches={n_batches_inferred}"
+        )
+    elif cfg.n_batches != n_batches_inferred:
+        raise ValueError(
+            f"cfg.n_batches={cfg.n_batches} but data implies "
+            f"n_batches={n_batches_inferred} (max batch index "
+            f"{int(batch_indices.max())})."
+        )
 
     if cfg.emb_dim != emb_dim:
         raise ValueError(
             f"cfg.emb_dim={cfg.emb_dim} does not match embedding dim={emb_dim}."
         )
+
+    _validate_batch_completeness(batch_indices, cfg.n_batches)
 
     if device is None:
         device = _detect_device()
@@ -509,7 +537,7 @@ def train_cae(
 
     logger.info(
         f"Training cAE | n_samples={n_samples:,} | emb_dim={emb_dim} | "
-        f"n_batches={n_batches} | latent_dim={cfg.latent_dim} | "
+        f"n_batches={cfg.n_batches} | latent_dim={cfg.latent_dim} | "
         f"hidden_dims={cfg.hidden_dims} | max_epochs={cfg.max_epochs} | "
         f"patience={cfg.patience} | seed={cfg.seed}"
     )
@@ -540,6 +568,7 @@ def train_cae(
         patience  = cfg.patience,
         min_delta = cfg.min_delta,
         alpha     = cfg.ema_alpha,
+        model     = model,
     )
 
     # ── Training loop ─────────────────────────────────────────────────────────
