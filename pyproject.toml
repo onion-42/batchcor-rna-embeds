@@ -52,6 +52,7 @@ dependencies = [
     "kneed>=0.8",
     # --- survival ---
     "lifelines>=0.27",
+    "scikit-survival>=0.22",
     # --- logging & viz ---
     "loguru>=0.7",
     "seaborn>=0.12",
@@ -59,6 +60,17 @@ dependencies = [
     "mygene>=3.2.2"
 ]
 requires-python = "~=3.11.0"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
 
 
 [tool.ruff]

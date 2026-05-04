@@ -410,8 +410,10 @@ def build_model_inputs(
     expr_values  = torch.full((n_cells, seq_len), PAD_VALUE, dtype=torch.long)
     key_pad_mask = torch.zeros((n_cells, seq_len), dtype=torch.bool)
 
-    g_tensor = torch.from_numpy(gene_ids).long()
-    b_tensor = torch.from_numpy(expr_binned).long()
+    # ``torch.tensor`` avoids environments where ``torch.from_numpy`` fails
+    # with "Numpy is not available" on some Windows / minimal torch builds.
+    g_tensor = torch.tensor(np.asarray(gene_ids), dtype=torch.long)
+    b_tensor = torch.tensor(np.asarray(expr_binned), dtype=torch.long)
 
     # Position 0 — CLS
     # The model uses pad_id as the input token for the CLS position and
