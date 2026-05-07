@@ -1,1 +1,1 @@
-"""Batch correction methods for RNA embeddings (Harmony, DANN)."""
+"""Batch correction methods for RNA embeddings (Harmony, DANN, scVI/cVAE)."""

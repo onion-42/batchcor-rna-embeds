@@ -49,6 +49,11 @@ COMPASS_PT_MODEL_URL: str = (
     "https://www.immuno-compass.com/download/model/pretrainer.pt"
 )
 
+# --- scVI-style cVAE Batch Correction ---
+SCVI_SUFFIX: str = "_scVI"
+SCVI_CORRECTED_KEY: str = "FM_COMPASS_PT_embedding_scVI_corrected"
+SCVI_LATENT_DIM: int = 128
+
 # Cancer code mapping for COMPASS (TCGA abbreviations)
 COHORT_CANCER_CODE: dict[str, str] = {
     "PUB_KIRC_ICI_combined": "KIRC",
