@@ -132,6 +132,8 @@ class CVAEConfig:
         Fraction of epochs for β ramp-up from 0 to ``beta_max``.
     dropout : float
         Dropout rate in encoder/decoder.
+    normalize : bool
+        If True, z-score normalize input features during fit/transform.
     seed : int
         Random seed for reproducibility.
     """
@@ -144,6 +146,7 @@ class CVAEConfig:
     beta_max: float = 1.0
     warmup_fraction: float = 0.3
     dropout: float = 0.2
+    normalize: bool = False
     seed: int = 42
 
 
@@ -201,6 +204,8 @@ class CVAECorrector:
         self.batch_encoder_: dict[str, int] = {}
         self._n_batches: int = 0
         self._device: torch.device = torch.device("cpu")
+        self._mean: np.ndarray | None = None
+        self._std: np.ndarray | None = None
 
     def fit(
         self,
@@ -238,12 +243,20 @@ class CVAECorrector:
             [self.batch_encoder_[b] for b in batch_labels], dtype=np.int64
         )
 
+        # Z-score normalization (fit statistics on training data)
+        if cfg.normalize:
+            self._mean = X.astype(np.float64).mean(axis=0).astype(np.float32)
+            self._std = X.astype(np.float64).std(axis=0).astype(np.float32)
+            self._std[self._std < 1e-8] = 1.0  # avoid div-by-zero
+            X = (X - self._mean) / self._std
+            logger.info("Z-score normalization enabled (computed on train)")
+
         input_dim = X.shape[1]
         logger.info(
             "cVAE config: input_dim={}, latent_dim={}, n_batches={}, "
-            "hidden={}, epochs={}, beta_max={:.2f}",
+            "hidden={}, epochs={}, beta_max={:.2f}, normalize={}",
             input_dim, cfg.latent_dim, self._n_batches,
-            cfg.hidden_dims, cfg.n_epochs, cfg.beta_max,
+            cfg.hidden_dims, cfg.n_epochs, cfg.beta_max, cfg.normalize,
         )
 
         self.model_ = _CVAEModule(
@@ -283,6 +296,10 @@ class CVAECorrector:
         """
         if self.model_ is None:
             raise RuntimeError("CVAECorrector not fitted. Call .fit() first.")
+
+        # Apply same normalization as training
+        if self.config.normalize and self._mean is not None:
+            X = (X - self._mean) / self._std
 
         self.model_.eval()
         X_t = torch.from_numpy(X.astype(np.float32)).to(self._device)
