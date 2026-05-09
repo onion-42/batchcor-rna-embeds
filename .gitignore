@@ -10,8 +10,13 @@
 # Auto-generated HTML report (rebuilt by every v4 pipeline run)
 /metrics/metrics_tables.html
 
-# Run logs (committed only on demand)
-logs_*.txt
+# Local experiment trees (seed sweeps, MICE trials — do not commit)
+metrics_csv/BEST_SEARCH/
+metrics_csv/MICE_attempt/
+
+# Root-level pipeline logs (optional local runs)
+v4_*.log
+v4_*.err.log
 
 # Mac OS-specific storage files
 .DS_Store

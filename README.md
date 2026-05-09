@@ -13,9 +13,15 @@ and binary Response) on multi-cohort immunotherapy data.
 
 | Task | Best feature set | Best model | Score |
 |---|---|---|---|
-| 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6616 ± 0.012** |
-| 5-fold CV ROC-AUC (Response) | cAE-PCA32 + Clinical | Stacked ensemble | **0.6302 ± 0.0227** |
-| OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | Raw scGPT + Clinical | LightGBM | **0.8775** |
+| 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6569 ± 0.015** |
+| 5-fold CV ROC-AUC (Response) | Raw scGPT-PCA32 + Clinical | Stacked ensemble | **0.6260 ± 0.0326** |
+| OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | Raw scGPT + Clinical | LightGBM | **0.8937** |
+
+Numbers mirror the latest `metrics_csv/v4_final_leaderboard.csv` and
+`v4_ood_pub_results.csv` from a full `v4_definitive_pipeline` run at
+**`V4_SEED=42`** (default). DeepSurv C-index has run-to-run variance of
+order **0.015**; values **0.66** in two-decimal reporting are consistent
+with rounding.
 
 The cAE-corrected embeddings beat raw scGPT on every survival model in
 internal CV. The latest OOD export evaluates **Raw scGPT + Clinical**
@@ -82,9 +88,9 @@ regenerates the cell structure deterministically. The existing
 notebook is the source of truth and ships with all plots embedded.
 
 Everything writes to **`metrics_csv/`** (numbers), **`metrics/`** (this notebook only),
-and **`visualizations/`**. Random seed is
-fixed at 42 across numpy, torch, scikit-learn, lifelines, sksurv,
-xgboost and lightgbm — fully reproducible.
+and **`visualizations/`**. The default random seed is **42** across numpy, torch,
+scikit-learn, lifelines, sksurv, xgboost and lightgbm — set **`V4_SEED`** to override
+for multi-seed sweeps without editing code.
 
 ---
 
@@ -127,6 +133,8 @@ batchcor-rna-embeds/
 └── visualizations/                 ← notebooks + auto-generated reference PNGs
     ├── visualizations_cae_correction.ipynb       ← cAE quality (writes TRAIN_*.png etc.)
     ├── visualizations_SOTA_analytics.ipynb       ← SOTA suite (~30 plots, all **inline**)
+    ├── plot_counts_vs_tpm.py / counts_vs_tpm_manifold.png   ← TPM vs Counts UMAP + KDE
+    ├── plot_pca_kills_signal.py / pca_signal_destruction.png ← PCA truncation vs response
     ├── batch_correction_metrics.png              ← from run_cae_correction
     ├── per_cohort_silhouette.png                 ← from run_cae_correction
     ├── TRAIN_*.png                               ← from visualizations_cae_correction.ipynb

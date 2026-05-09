@@ -33,8 +33,9 @@ adds 0.02-0.04 to the C-index versus the best single model.
 Output structure (only audit-grade files retained)
 --------------------------------------------------
   metrics_csv/
-    v4_survival_results.csv         - per-model 5-fold C-index
-    v4_classification_results.csv   - per-model 5-fold AUC + F1
+    v4_survival_results.csv          - per-model 5-fold C-index (long)
+    v4_cindex_survival_matrix.csv    - wide pivot: feature set × model (auto-synced)
+    v4_classification_results.csv    - per-model 5-fold AUC + F1
     v4_ood_pub_results.csv          - cross-cohort OOD AUC table
     v4_final_leaderboard.csv        - one-row-per-feature-set summary
 
@@ -53,6 +54,9 @@ Usage
 -----
     cd batchcor-rna-embeds
     python -m batchcor_rna_emb.stress_test.v4_definitive_pipeline
+
+Optional: ``V4_SEED`` environment variable overrides the default (42) for
+reproducibility experiments without editing the file.
 """
 
 from __future__ import annotations
@@ -71,6 +75,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -134,7 +139,19 @@ logger.add(
 # =============================================================================
 # CONFIG
 # =============================================================================
-SEED: int = 42
+def _env_int(name: str, default: int) -> int:
+    """Parse optional integer env vars (e.g. multi-seed experiments)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} is not an integer; using default {default}")
+        return default
+
+
+SEED: int = _env_int("V4_SEED", 42)
 
 PROCESSED_DIR : Path = Path("data/processed")
 CKPT_PATH     : Path = Path("checkpoints/cae_trained.pt")
@@ -196,9 +213,15 @@ METRICS_CSV_DIR : Path = Path("metrics_csv")
 VIZ_DIR         : Path = Path("visualizations")
 
 V4_SURV_CSV  : Path = METRICS_CSV_DIR / "v4_survival_results.csv"
+V4_SURV_MAT  : Path = METRICS_CSV_DIR / "v4_cindex_survival_matrix.csv"
 V4_CLF_CSV   : Path = METRICS_CSV_DIR / "v4_classification_results.csv"
 V4_OOD_CSV   : Path = METRICS_CSV_DIR / "v4_ood_pub_results.csv"
 V4_BOARD_CSV : Path = METRICS_CSV_DIR / "v4_final_leaderboard.csv"
+
+# Column order for wide survival matrix (matches bar-chart models)
+SURVIVAL_MODEL_COL_ORDER: list[str] = [
+    "Cox-strat", "Coxnet", "RSF", "GB-Surv", "XGB-Cox", "DeepSurv", "Stack",
+]
 
 # Heuristics for response detection
 RESPONSE_KEYWORDS = ["response", "responder", "respond", "benefit", "bor", "recist"]
@@ -322,10 +345,6 @@ def build_features(
 ) -> tuple[np.ndarray, list[str], "FitState"]:
     """
     Assemble (embedding [+PCA] + MFP + Kassandra + Diagnosis-onehot) -> X.
-
-    All NaN clinical values are imputed with the *training* median to avoid
-    leakage. When `fitted` is provided we re-use the same PCA / scaler /
-    diagnosis categories / clinical-medians from the training fold.
     """
     emb = np.asarray(adata.obsm[embedding_key], dtype=np.float32)
 
@@ -771,7 +790,7 @@ def survival_cv(
                 f"cox_strat={'on' if use_cox_strat else 'off (too many features)'} ---")
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
-    models = ["Cox-strat", "Coxnet", "RSF", "GB-Surv", "XGB-Cox", "DeepSurv", "Stack"]
+    models = list(SURVIVAL_MODEL_COL_ORDER)
     folds  : dict[str, list[float]] = {m: [] for m in models}
 
     strata_event = (e_full > 0).astype(int)
@@ -861,6 +880,88 @@ def survival_cv(
             f"  -> {emb_label:<28} {m:<10} mean C={mean_:.4f} +/- {std_:.4f}"
         )
     return summary
+
+
+def full_fit_survival_risk(
+    best_model_name: str,
+    X_full        : np.ndarray,
+    t_full        : np.ndarray,
+    e_full        : np.ndarray,
+    cohort_full   : np.ndarray,
+    feat_names    : list[str],
+    device        : torch.device,
+    label         : str,
+) -> np.ndarray:
+    """
+    Full-sample risk scores for Kaplan–Meier plots.
+
+    Must mirror the model definitions in ``survival_cv`` (especially
+    ``Stack`` = mean rank of component risks; ``DeepSurv`` = MLP log-risk).
+    """
+    y_full   = make_sksurv_y(t_full, e_full)
+    use_cox  = X_full.shape[1] <= COX_STRAT_MAX_DIM
+
+    def _rank(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        order = np.argsort(x)
+        ranks = np.empty_like(order, dtype=float)
+        ranks[order] = np.arange(len(x))
+        return ranks / max(len(x) - 1, 1)
+
+    km_tag = f"KM-{label}"
+
+    try:
+        if best_model_name == "Cox-strat":
+            if not use_cox:
+                logger.warning(
+                    "[%s] Cox-strat disabled (dim>%s); KM uses RSF",
+                    label, COX_STRAT_MAX_DIM,
+                )
+                return _rsf_fit_predict(X_full, y_full, X_full, label=km_tag)
+            return _cox_strat_fit_predict(
+                X_full, t_full, e_full, cohort_full,
+                X_full, cohort_full, feat_names, label=km_tag,
+            )
+        if best_model_name == "Coxnet":
+            return _coxnet_fit_predict(X_full, y_full, X_full, label=km_tag)
+        if best_model_name == "RSF":
+            return _rsf_fit_predict(X_full, y_full, X_full, label=km_tag)
+        if best_model_name == "GB-Surv":
+            return _gbsa_fit_predict(X_full, y_full, X_full, label=km_tag)
+        if best_model_name == "XGB-Cox":
+            return _xgbcox_fit_predict(
+                X_full, t_full, e_full, X_full, label=km_tag,
+            )
+        if best_model_name == "DeepSurv":
+            return _deepsurv_fit_predict(
+                X_full, t_full, e_full, X_full, device, label=km_tag,
+            )
+        if best_model_name == "Stack":
+            components: list[np.ndarray] = []
+            if use_cox:
+                components.append(
+                    _cox_strat_fit_predict(
+                        X_full, t_full, e_full, cohort_full,
+                        X_full, cohort_full, feat_names, label=f"{km_tag}-c",
+                    )
+                )
+            components.extend(
+                [
+                    _coxnet_fit_predict(X_full, y_full, X_full, label=f"{km_tag}-cn"),
+                    _rsf_fit_predict(X_full, y_full, X_full, label=f"{km_tag}-rsf"),
+                    _gbsa_fit_predict(X_full, y_full, X_full, label=f"{km_tag}-gb"),
+                    _xgbcox_fit_predict(
+                        X_full, t_full, e_full, X_full, label=f"{km_tag}-xgb",
+                    ),
+                    _deepsurv_fit_predict(
+                        X_full, t_full, e_full, X_full, device, label=f"{km_tag}-ds",
+                    ),
+                ]
+            )
+            return np.mean([_rank(c) for c in components], axis=0)
+    except Exception as exc:
+        logger.warning("[%s] KM full-fit failed (%s); falling back to RSF", label, exc)
+    return _rsf_fit_predict(X_full, y_full, X_full, label=f"{km_tag}-fallback")
 
 
 # =============================================================================
@@ -1227,12 +1328,28 @@ def run_ood_stress_test(
 # VISUALIZATIONS
 # =============================================================================
 
+def _v4_plot_style() -> None:
+    """Consistent seaborn theme + export DPI for all v4 PNGs."""
+    sns.set_theme(style="whitegrid", context="notebook", font_scale=0.92)
+    plt.rcParams.update({
+        "figure.dpi"     : 100,
+        "savefig.dpi"    : 220,
+        "axes.titlesize" : 12,
+        "axes.labelsize" : 11,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 8,
+        "axes.titlepad"  : 10,
+    })
+
+
 def viz_cindex_bar(
     surv_summary: dict[str, dict[str, dict[str, float | list[float]]]],
 ) -> None:
-    fig, ax = plt.subplots(figsize=(13, 6))
+    _v4_plot_style()
+    fig, ax = plt.subplots(figsize=(14, 6.2))
     embeddings = list(surv_summary.keys())
-    models = ["Cox-strat", "Coxnet", "RSF", "GB-Surv", "XGB-Cox", "DeepSurv", "Stack"]
+    models = list(SURVIVAL_MODEL_COL_ORDER)
     colors = ["#2E86AB", "#9DA5C0", "#3CB371", "#F4A261", "#E5A442",
               "#E76F51", "#5C2A9D"]
     width  = 0.11
@@ -1253,15 +1370,15 @@ def viz_cindex_bar(
     ax.axhline(SURVIVAL_TARGET_CINDEX, color="red", linestyle="--",
                linewidth=1.2, label=f"target = {SURVIVAL_TARGET_CINDEX:.2f}")
     ax.set_xticks(x)
-    ax.set_xticklabels(embeddings, rotation=12, ha="right")
+    ax.set_xticklabels(embeddings, rotation=14, ha="right")
     ax.set_ylabel("5-fold CV C-index (PFS)")
-    ax.set_title("Survival benchmark -- C-index by model and feature set")
+    ax.set_title("Survival benchmark — C-index by model and feature set")
     ax.set_ylim(0.50, 0.85)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper left", ncol=4, fontsize=8)
-    fig.tight_layout()
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=4, fontsize=8)
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
     out = VIZ_DIR / "v4_cindex_bar.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved {out}")
 
@@ -1269,7 +1386,8 @@ def viz_cindex_bar(
 def viz_response_auc_bar(
     clf_summary: dict[str, dict[str, dict[str, float | list[float]]]],
 ) -> None:
-    fig, ax = plt.subplots(figsize=(11, 6))
+    _v4_plot_style()
+    fig, ax = plt.subplots(figsize=(12, 6.2))
     embeddings = list(clf_summary.keys())
     models = ["LogReg", "RF", "XGBoost", "LightGBM", "MLP", "Stack"]
     colors = ["#2E86AB", "#9DA5C0", "#3CB371", "#F4A261", "#E76F51", "#5C2A9D"]
@@ -1292,13 +1410,13 @@ def viz_response_auc_bar(
     ax.set_xticks(x)
     ax.set_xticklabels(embeddings, rotation=12, ha="right")
     ax.set_ylabel("5-fold CV ROC-AUC (Response)")
-    ax.set_title("Response classification -- AUC by model and feature set")
+    ax.set_title("Response classification — AUC by model and feature set")
     ax.set_ylim(0.40, 0.90)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper left", ncol=4, fontsize=8)
-    fig.tight_layout()
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.16), ncol=3, fontsize=8)
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
     out = VIZ_DIR / "v4_response_auc_bar.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved {out}")
 
@@ -1309,6 +1427,7 @@ def viz_km_risk_strata(
     """KM curves for low/mid/high risk tertiles produced by the best model."""
     if len(risk_score) == 0:
         return
+    _v4_plot_style()
     q1, q2 = np.quantile(risk_score, [1 / 3, 2 / 3])
     grp = np.where(risk_score <= q1, "low",
           np.where(risk_score >= q2, "high", "mid"))
@@ -1322,13 +1441,13 @@ def viz_km_risk_strata(
             continue
         kmf.fit(t[m], event_observed=e[m], label=f"{tag} (n={int(m.sum())})")
         kmf.plot_survival_function(ax=ax, ci_show=True, color=colors[tag])
-    ax.set_title(f"Kaplan-Meier -- predicted risk tertiles ({label})")
+    ax.set_title(f"Kaplan–Meier — predicted risk tertiles ({label})")
     ax.set_xlabel("PFS time (days)")
     ax.set_ylabel("Survival probability")
     ax.grid(linestyle=":", alpha=0.5)
     fig.tight_layout()
     out = VIZ_DIR / "v4_km_risk_strata.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved {out}")
 
@@ -1336,11 +1455,8 @@ def viz_km_risk_strata(
 def viz_pub_ood(ood_df: pd.DataFrame) -> None:
     if ood_df.empty:
         return
-    pivot = ood_df.pivot_table(
-        index="classifier", columns=["embedding", "pub_dataset"],
-        values="roc_auc", aggfunc="mean",
-    )
-    fig, ax = plt.subplots(figsize=(11, 6))
+    _v4_plot_style()
+    fig, ax = plt.subplots(figsize=(12, 6.2))
     pivot_df = ood_df.copy()
     pivot_df["combo"] = pivot_df["embedding"] + " | " + pivot_df["pub_dataset"]
     classifiers = ["LogReg", "RF", "XGBoost", "LightGBM", "MLP", "Stack"]
@@ -1361,13 +1477,18 @@ def viz_pub_ood(ood_df: pd.DataFrame) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(classifiers)
     ax.set_ylabel("ROC-AUC on PUB cohort")
-    ax.set_title("OOD generalisation -- response AUC per PUB cohort")
-    ax.set_ylim(0.30, 0.85)
+    ax.set_title("OOD generalisation — response AUC per PUB cohort")
+    vals = pivot_df["roc_auc"].to_numpy(dtype=float)
+    vals = vals[np.isfinite(vals)]
+    lo = float(np.nanmin(vals)) if len(vals) else 0.35
+    hi = float(np.nanmax(vals)) if len(vals) else 0.95
+    pad = max(0.05 * (hi - lo), 0.03)
+    ax.set_ylim(max(0.25, lo - pad), min(0.99, hi + pad))
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper left", fontsize=7, ncol=2)
-    fig.tight_layout()
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.22), fontsize=7, ncol=2)
+    fig.tight_layout(rect=[0, 0, 1, 0.82])
     out = VIZ_DIR / "v4_pub_ood_auc.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved {out}")
 
@@ -1379,6 +1500,7 @@ def viz_feature_importance(
     lgbm = fitted.get("LightGBM")
     if lgbm is None:
         return
+    _v4_plot_style()
     gains = lgbm.booster_.feature_importance(importance_type="gain")
     imp = (
         pd.DataFrame({"feature": feat_names, "gain": gains})
@@ -1394,7 +1516,7 @@ def viz_feature_importance(
     ax.grid(axis="x", linestyle=":", alpha=0.5)
     fig.tight_layout()
     out = VIZ_DIR / "v4_feature_importance.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Saved {out}")
 
@@ -1422,9 +1544,22 @@ def save_survival_csv(
     METRICS_CSV_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(V4_SURV_CSV, index=False)
     logger.info(f"Saved {V4_SURV_CSV}")
+    _write_survival_cindex_matrix(df)
     return df
 
 
+def _write_survival_cindex_matrix(long_df: pd.DataFrame) -> None:
+    """Wide matrix: rows = feature set, columns = survival model (mean C-index)."""
+    wide = long_df.pivot_table(
+        index="embedding",
+        columns="model",
+        values="cindex_mean",
+        aggfunc="first",
+    )
+    wide = wide.reindex(columns=SURVIVAL_MODEL_COL_ORDER)
+    wide = wide.reset_index()
+    wide.to_csv(V4_SURV_MAT, index=False, float_format="%.6f")
+    logger.info(f"Saved {V4_SURV_MAT}")
 def save_classification_csv(
     clf_summary: dict[str, dict[str, dict[str, float | list[float]]]],
 ) -> pd.DataFrame:
@@ -1681,6 +1816,7 @@ def main() -> None:
     logger.info("v4 DEFINITIVE PIPELINE -- clinical stress test + survival")
     logger.info("=" * 70)
     set_seed(SEED)
+    logger.info(f"Random seed SEED={SEED} (set env V4_SEED to override)")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
     METRICS_CSV_DIR.mkdir(parents=True, exist_ok=True)
@@ -1830,31 +1966,17 @@ def main() -> None:
         X_full, feat_names, _ = build_features(
             train_surv, embedding_key=emb_k, pca_dim=pca_dim,
         )
-        y_surv = make_sksurv_y(t_arr, e_arr)
         try:
-            if best_model_name == "RSF":
-                rsf = RandomSurvivalForest(**RSF_PARAMS)
-                rsf.fit(X_full, y_surv)
-                risk = rsf.predict(X_full)
-            elif best_model_name == "GB-Surv":
-                gb = GradientBoostingSurvivalAnalysis(**GB_SURV_PARAMS)
-                gb.fit(X_full, y_surv)
-                risk = gb.predict(X_full)
-            elif best_model_name == "Coxnet":
-                est = CoxnetSurvivalAnalysis(
-                    l1_ratio=COX_L1_RATIO, alphas=[0.05],
-                    fit_baseline_model=False, max_iter=4000,
-                )
-                est.fit(X_full, y_surv)
-                risk = est.predict(X_full)
-            elif best_model_name == "XGB-Cox":
-                risk = _xgbcox_fit_predict(
-                    X_full, t_arr, e_arr, X_full, label="full-fit",
-                )
-            else:
-                rsf = RandomSurvivalForest(**RSF_PARAMS)
-                rsf.fit(X_full, y_surv)
-                risk = rsf.predict(X_full)
+            risk = full_fit_survival_risk(
+                best_model_name,
+                X_full,
+                t_arr,
+                e_arr,
+                cohort_arr,
+                feat_names,
+                device,
+                label=best_label,
+            )
             viz_km_risk_strata(
                 np.asarray(risk).astype(float), t_arr, e_arr, label=best_label,
             )

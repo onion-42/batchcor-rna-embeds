@@ -4,8 +4,11 @@ This package evaluates **survival (C-index)** and **binary response (ROC-AUC)** 
 
 | Module | Purpose |
 | --- | --- |
-| **`survival_benchmark.py`** | **PFS / Harrell’s C-index only** — 5-fold CV. Writes **`metrics_csv/v4_survival_results.csv`** and executes **`metrics/metrics_tables.ipynb`**. |
+| **`survival_benchmark.py`** | **PFS / Harrell’s C-index only** — 5-fold CV. Writes **`metrics_csv/v4_survival_results.csv`**, regenerates **`v4_cindex_survival_matrix.csv`**, and executes **`metrics/metrics_tables.ipynb`**. |
 | **`v4_definitive_pipeline.py`** | Full pipeline: survival + response + OOD + figures + leaderboard CSV under **`metrics_csv/`**; executes **`metrics/metrics_tables.ipynb`** at the end. |
+
+Reproducibility: set environment variable **`V4_SEED`** (integer) before launch to
+match multi-seed experiments; default is **42**.
 
 Run survival-only (~15–20 min on CPU):
 
