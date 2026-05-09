@@ -90,7 +90,14 @@ notebook is the source of truth and ships with all plots embedded.
 Everything writes to **`metrics_csv/`** (numbers), **`metrics/`** (this notebook only),
 and **`visualizations/`**. The default random seed is **42** across numpy, torch,
 scikit-learn, lifelines, sksurv, xgboost and lightgbm — set **`V4_SEED`** to override
-for multi-seed sweeps without editing code.
+for multi-seed sweeps without editing code. Set **`V4_SMOKE=1`** to collapse the
+pipeline to 2 folds + 10-epoch DeepSurv/MLP for quick iteration (~6 min vs ~24 min).
+
+CV honesty: every fold of `survival_cv` and `classification_cv` re-fits the PCA
+basis, `StandardScaler`, clinical-feature medians, and one-hot category dictionary
+on training rows only and transforms the held-out rows with the captured fit-state
+— no leakage of validation samples into the embedding/scaler/imputer (matches the
+pattern already used by `run_75_acceptance_criterion.py`).
 
 ---
 
@@ -121,7 +128,10 @@ batchcor-rna-embeds/
 │   ├── v4_survival_results.csv
 │   ├── v4_cindex_survival_matrix.csv   ← wide table: feature set × survival model (5-fold CV mean C-index)
 │   ├── v4_classification_results.csv
+│   ├── v4_response_auc_matrix.csv      ← wide table: feature set × classifier (5-fold CV mean ROC-AUC)
 │   ├── v4_ood_pub_results.csv
+│   ├── v4_per_pub_best.csv             ← one-row-per-PUB best (embedding × classifier)
+│   ├── v4_km_risk_scores.csv           ← per-patient risk scores feeding the KM plot
 │   ├── v4_final_leaderboard.csv
 │   └── batch_correction_metrics.{csv,json}
 │

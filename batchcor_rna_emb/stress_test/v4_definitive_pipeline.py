@@ -55,14 +55,16 @@ Usage
     cd batchcor-rna-embeds
     python -m batchcor_rna_emb.stress_test.v4_definitive_pipeline
 
-Optional: ``V4_SEED`` environment variable overrides the default (42) for
-reproducibility experiments without editing the file.
+Optional environment variables
+------------------------------
+* ``V4_SEED``    -- override the default seed (42) for multi-seed experiments.
+* ``V4_SMOKE=1`` -- 2-fold CV + 10-epoch DeepSurv/MLP for fast dev iteration
+                    (full pipeline finishes in ~1 min instead of ~24 min).
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import os
 import subprocess
 import sys
@@ -92,7 +94,6 @@ from sklearn.model_selection import (
     StratifiedKFold,
     train_test_split,
 )
-from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from lifelines import CoxPHFitter, KaplanMeierFitter
@@ -111,11 +112,6 @@ import lightgbm as lgb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
-
-from batchcor_rna_emb.batch_correction.cae import (
-    ConditionalAutoencoder,
-    _l2_normalize,
-)
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -151,7 +147,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Truthy if the env var is set to one of: 1, true, yes, on (case-insensitive)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
 SEED: int = _env_int("V4_SEED", 42)
+SMOKE: bool = _env_bool("V4_SMOKE", False)  # `--smoke` parses to V4_SMOKE=1
 
 PROCESSED_DIR : Path = Path("data/processed")
 CKPT_PATH     : Path = Path("checkpoints/cae_trained.pt")
@@ -168,9 +173,9 @@ CAE_KEY      : str = "cAE_embedding"
 CAE_OOD_KEY  : str = "cAE_embedding_OOD"
 SCGPT_FT_KEY : str = "scGPT_finetuned_embedding"  # written by finetune_scgpt_survival.py
 
-# CV
-N_SPLITS_CLF  : int = 5
-N_SPLITS_SURV : int = 5
+# CV (V4_SMOKE=1 collapses to 2 folds for fast dev iteration)
+N_SPLITS_CLF  : int = 2 if SMOKE else 5
+N_SPLITS_SURV : int = 2 if SMOKE else 5
 
 # Survival hyperparams
 SURVIVAL_PCA_DIM : int = 32    # adaptive embedding-side compression
@@ -193,7 +198,7 @@ DEEPSURV_HIDDEN  : list[int] = [256, 64]
 DEEPSURV_DROPOUT : float     = 0.30
 DEEPSURV_LR      : float     = 5e-4
 DEEPSURV_WD      : float     = 1e-4
-DEEPSURV_EPOCHS  : int       = int(os.environ.get("DEEPSURV_EPOCHS", 120))
+DEEPSURV_EPOCHS  : int       = int(os.environ.get("DEEPSURV_EPOCHS", 10 if SMOKE else 120))
 DEEPSURV_PAT     : int       = 25
 DEEPSURV_BATCH   : int       = 256
 
@@ -201,7 +206,7 @@ DEEPSURV_BATCH   : int       = 256
 CLF_HIDDEN_1     : int   = 256
 CLF_HIDDEN_2     : int   = 64
 CLF_DROPOUT      : float = 0.30
-CLF_MLP_EPOCHS   : int   = int(os.environ.get("CLF_MLP_EPOCHS", 80))
+CLF_MLP_EPOCHS   : int   = int(os.environ.get("CLF_MLP_EPOCHS", 10 if SMOKE else 80))
 CLF_MLP_PAT      : int   = 20
 
 # Acceptance gate
@@ -215,8 +220,11 @@ VIZ_DIR         : Path = Path("visualizations")
 V4_SURV_CSV  : Path = METRICS_CSV_DIR / "v4_survival_results.csv"
 V4_SURV_MAT  : Path = METRICS_CSV_DIR / "v4_cindex_survival_matrix.csv"
 V4_CLF_CSV   : Path = METRICS_CSV_DIR / "v4_classification_results.csv"
+V4_CLF_MAT   : Path = METRICS_CSV_DIR / "v4_response_auc_matrix.csv"
 V4_OOD_CSV   : Path = METRICS_CSV_DIR / "v4_ood_pub_results.csv"
+V4_OOD_BEST  : Path = METRICS_CSV_DIR / "v4_per_pub_best.csv"
 V4_BOARD_CSV : Path = METRICS_CSV_DIR / "v4_final_leaderboard.csv"
+V4_KM_CSV    : Path = METRICS_CSV_DIR / "v4_km_risk_scores.csv"
 
 # Column order for wide survival matrix (matches bar-chart models)
 SURVIVAL_MODEL_COL_ORDER: list[str] = [
@@ -767,26 +775,38 @@ def _deepsurv_fit_predict(
 
 
 def survival_cv(
-    X_full     : np.ndarray,
-    t_full     : np.ndarray,
-    e_full     : np.ndarray,
-    cohort_full: np.ndarray,
-    feat_names : list[str],
-    device     : torch.device,
-    emb_label  : str,
-    n_splits   : int = N_SPLITS_SURV,
+    train_adata  : sc.AnnData,
+    embedding_key: str,
+    pca_dim      : int | None,
+    t_full       : np.ndarray,
+    e_full       : np.ndarray,
+    cohort_full  : np.ndarray,
+    device       : torch.device,
+    emb_label    : str,
+    n_splits     : int = N_SPLITS_SURV,
 ) -> dict[str, dict[str, float | list[float]]]:
     """
     Run 5-fold CV with stratified shuffle on event flag for each model.
     Returns nested dict of {model_name: {"folds": [...], "mean": ..., "std": ...}}.
 
+    Honest-CV: ``build_features`` is **refit per fold** on the training rows
+    only, then transformed onto the held-out rows via the captured
+    ``FitState`` -- this prevents the PCA basis, StandardScaler statistics,
+    and clinical-feature medians from leaking validation-fold information
+    into training.
+
     Cox-strat (lifelines) is skipped when dim > COX_STRAT_MAX_DIM since
     Newton's method on hundreds of features per stratum is intractable
     on CPU; the other models cover that regime.
     """
-    use_cox_strat = X_full.shape[1] <= COX_STRAT_MAX_DIM
-    logger.info(f"  --- Survival CV ({emb_label}) | n={len(X_full)} | "
-                f"events={int(e_full.sum())} | dim={X_full.shape[1]} | "
+    n_total = train_adata.n_obs
+    # Probe dim with a one-shot fit just for logging / cox-strat decision
+    X_probe, _, _ = build_features(
+        train_adata, embedding_key=embedding_key, pca_dim=pca_dim,
+    )
+    use_cox_strat = X_probe.shape[1] <= COX_STRAT_MAX_DIM
+    logger.info(f"  --- Survival CV ({emb_label}) | n={n_total} | "
+                f"events={int(e_full.sum())} | dim={X_probe.shape[1]} | "
                 f"cox_strat={'on' if use_cox_strat else 'off (too many features)'} ---")
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
@@ -795,8 +815,6 @@ def survival_cv(
 
     strata_event = (e_full > 0).astype(int)
 
-    y_full = make_sksurv_y(t_full, e_full)
-
     def _rank(x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=float)
         order = np.argsort(x)
@@ -804,12 +822,19 @@ def survival_cv(
         ranks[order] = np.arange(len(x))
         return ranks / max(len(x) - 1, 1)
 
-    for fold, (tr_idx, te_idx) in enumerate(skf.split(X_full, strata_event), 1):
-        X_tr, X_te = X_full[tr_idx], X_full[te_idx]
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(np.zeros(n_total), strata_event), 1):
+        adata_tr, adata_te = train_adata[tr_idx], train_adata[te_idx]
+        X_tr, feat_names, fit_state = build_features(
+            adata_tr, embedding_key=embedding_key, pca_dim=pca_dim,
+        )
+        X_te, _, _ = build_features(
+            adata_te, embedding_key=embedding_key, pca_dim=pca_dim,
+            fitted=fit_state,
+        )
         t_tr, t_te = t_full[tr_idx], t_full[te_idx]
         e_tr, e_te = e_full[tr_idx], e_full[te_idx]
         c_tr, c_te = cohort_full[tr_idx], cohort_full[te_idx]
-        y_tr       = y_full[tr_idx]
+        y_tr       = make_sksurv_y(t_tr, e_tr)
 
         if use_cox_strat:
             t0 = time.perf_counter()
@@ -1121,21 +1146,36 @@ def predict_classifier_proba(
 
 
 def classification_cv(
-    X_full : np.ndarray,
-    y_full : np.ndarray,
-    device : torch.device,
-    emb_label : str,
-    n_splits  : int = N_SPLITS_CLF,
+    train_adata  : sc.AnnData,
+    embedding_key: str,
+    pca_dim      : int | None,
+    y_full       : np.ndarray,
+    device       : torch.device,
+    emb_label    : str,
+    n_splits     : int = N_SPLITS_CLF,
 ) -> dict[str, dict[str, float | list[float]]]:
-    logger.info(f"  --- Classification CV ({emb_label}) | n={len(X_full)} | "
+    """
+    Honest-CV response classification: ``build_features`` is refit per fold
+    on training rows only, then transformed onto the validation rows via
+    the captured ``FitState`` (no PCA / scaler / median-imputation leakage).
+    """
+    n_total = train_adata.n_obs
+    logger.info(f"  --- Classification CV ({emb_label}) | n={n_total} | "
                 f"pos={int((y_full == 1).sum())} | neg={int((y_full == 0).sum())} ---")
 
     skf    = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
     models = ["LogReg", "RF", "XGBoost", "LightGBM", "MLP", "Stack"]
     folds  : dict[str, list[tuple[float, float]]] = {m: [] for m in models}
 
-    for fold, (tr_idx, te_idx) in enumerate(skf.split(X_full, y_full), 1):
-        X_tr, X_te = X_full[tr_idx], X_full[te_idx]
+    for fold, (tr_idx, te_idx) in enumerate(skf.split(np.zeros(n_total), y_full), 1):
+        adata_tr, adata_te = train_adata[tr_idx], train_adata[te_idx]
+        X_tr, _, fit_state = build_features(
+            adata_tr, embedding_key=embedding_key, pca_dim=pca_dim,
+        )
+        X_te, _, _ = build_features(
+            adata_te, embedding_key=embedding_key, pca_dim=pca_dim,
+            fitted=fit_state,
+        )
         y_tr, y_te = y_full[tr_idx], y_full[te_idx]
         fitted = fit_classifiers(X_tr, y_tr, device=device,
                                  label=f"{emb_label} | fold{fold}")
@@ -1453,40 +1493,69 @@ def viz_km_risk_strata(
 
 
 def viz_pub_ood(ood_df: pd.DataFrame) -> None:
+    """One subplot per PUB cohort: AUC by classifier, coloured by embedding.
+
+    The previous single-axes version became unreadable with N>2 embeddings
+    because (n_embs * n_pubs) bars per classifier collide. Faceting per PUB
+    keeps each panel to (n_embs) bars per classifier and a single legend.
+    """
     if ood_df.empty:
         return
     _v4_plot_style()
-    fig, ax = plt.subplots(figsize=(12, 6.2))
-    pivot_df = ood_df.copy()
-    pivot_df["combo"] = pivot_df["embedding"] + " | " + pivot_df["pub_dataset"]
     classifiers = ["LogReg", "RF", "XGBoost", "LightGBM", "MLP", "Stack"]
-    pubs = sorted(pivot_df["pub_dataset"].unique())
-    embs = sorted(pivot_df["embedding"].unique())
-    width = 0.10
-    x = np.arange(len(classifiers))
+    pubs = sorted(ood_df["pub_dataset"].unique())
+    embs = sorted(ood_df["embedding"].unique())
+    n_pubs = len(pubs)
+    n_embs = max(len(embs), 1)
+
     cmap = plt.get_cmap("tab10")
-    for j, (emb, pub) in enumerate([(e, p) for e in embs for p in pubs]):
-        sub = pivot_df[(pivot_df["embedding"] == emb)
-                       & (pivot_df["pub_dataset"] == pub)]
-        sub = sub.set_index("classifier").reindex(classifiers)["roc_auc"]
-        offset = (j - (len(embs) * len(pubs) - 1) / 2) * width
-        ax.bar(x + offset, sub.values, width,
-               label=f"{emb} -> {pub}", color=cmap(j % 10),
-               edgecolor="black", linewidth=0.3)
-    ax.axhline(0.5, color="grey", linestyle="--", linewidth=1)
-    ax.set_xticks(x)
-    ax.set_xticklabels(classifiers)
-    ax.set_ylabel("ROC-AUC on PUB cohort")
-    ax.set_title("OOD generalisation — response AUC per PUB cohort")
-    vals = pivot_df["roc_auc"].to_numpy(dtype=float)
+    emb_colors = {emb: cmap(i % 10) for i, emb in enumerate(embs)}
+
+    fig, axes = plt.subplots(
+        1, n_pubs, figsize=(5.5 * n_pubs, 5.0),
+        sharey=True, squeeze=False,
+    )
+    width = 0.8 / n_embs
+    x = np.arange(len(classifiers))
+
+    vals = ood_df["roc_auc"].to_numpy(dtype=float)
     vals = vals[np.isfinite(vals)]
     lo = float(np.nanmin(vals)) if len(vals) else 0.35
     hi = float(np.nanmax(vals)) if len(vals) else 0.95
     pad = max(0.05 * (hi - lo), 0.03)
-    ax.set_ylim(max(0.25, lo - pad), min(0.99, hi + pad))
-    ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.22), fontsize=7, ncol=2)
-    fig.tight_layout(rect=[0, 0, 1, 0.82])
+    y_lo = max(0.25, lo - pad)
+    y_hi = min(0.99, hi + pad)
+
+    for col, pub in enumerate(pubs):
+        ax = axes[0, col]
+        sub_pub = ood_df[ood_df["pub_dataset"] == pub]
+        for j, emb in enumerate(embs):
+            sub = (
+                sub_pub[sub_pub["embedding"] == emb]
+                .set_index("classifier")
+                .reindex(classifiers)["roc_auc"]
+            )
+            offset = (j - (n_embs - 1) / 2) * width
+            ax.bar(
+                x + offset, sub.values, width,
+                color=emb_colors[emb], label=emb if col == 0 else None,
+                edgecolor="black", linewidth=0.3,
+            )
+        ax.axhline(0.5, color="grey", linestyle="--", linewidth=1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(classifiers, rotation=20, ha="right")
+        ax.set_title(pub)
+        ax.set_ylim(y_lo, y_hi)
+        ax.grid(axis="y", linestyle=":", alpha=0.5)
+        if col == 0:
+            ax.set_ylabel("ROC-AUC on PUB cohort")
+
+    fig.suptitle("OOD generalisation - response AUC per PUB cohort", y=1.02)
+    fig.legend(
+        loc="upper center", bbox_to_anchor=(0.5, 0.965),
+        ncol=min(n_embs, 3), fontsize=8, frameon=True,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
     out = VIZ_DIR / "v4_pub_ood_auc.png"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -1560,6 +1629,8 @@ def _write_survival_cindex_matrix(long_df: pd.DataFrame) -> None:
     wide = wide.reset_index()
     wide.to_csv(V4_SURV_MAT, index=False, float_format="%.6f")
     logger.info(f"Saved {V4_SURV_MAT}")
+
+
 def save_classification_csv(
     clf_summary: dict[str, dict[str, dict[str, float | list[float]]]],
 ) -> pd.DataFrame:
@@ -1583,7 +1654,50 @@ def save_classification_csv(
     METRICS_CSV_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(V4_CLF_CSV, index=False)
     logger.info(f"Saved {V4_CLF_CSV}")
+    _write_response_auc_matrix(df)
     return df
+
+
+CLF_MODEL_COL_ORDER: list[str] = [
+    "LogReg", "RF", "XGBoost", "LightGBM", "MLP", "Stack",
+]
+
+
+def _write_response_auc_matrix(long_df: pd.DataFrame) -> None:
+    """Wide matrix: rows = feature set, columns = classifier (mean ROC-AUC)."""
+    wide = long_df.pivot_table(
+        index="embedding",
+        columns="model",
+        values="auc_mean",
+        aggfunc="first",
+    )
+    wide = wide.reindex(columns=CLF_MODEL_COL_ORDER)
+    wide = wide.reset_index()
+    wide.to_csv(V4_CLF_MAT, index=False, float_format="%.6f")
+    logger.info(f"Saved {V4_CLF_MAT}")
+
+
+def _write_per_pub_best(ood_df: pd.DataFrame) -> None:
+    """One row per PUB cohort: best (embedding, classifier) by ROC-AUC."""
+    if ood_df.empty:
+        return
+    rows = []
+    for pub, sub in ood_df.groupby("pub_dataset"):
+        valid = sub.dropna(subset=["roc_auc"])
+        if valid.empty:
+            continue
+        top = valid.sort_values("roc_auc", ascending=False).iloc[0]
+        rows.append({
+            "pub_dataset"   : pub,
+            "n"             : int(top["n"]),
+            "best_embedding": top["embedding"],
+            "best_classifier": top["classifier"],
+            "roc_auc"       : float(top["roc_auc"]),
+        })
+    if not rows:
+        return
+    pd.DataFrame(rows).to_csv(V4_OOD_BEST, index=False, float_format="%.6f")
+    logger.info(f"Saved {V4_OOD_BEST}")
 
 
 def save_leaderboard(
@@ -1817,6 +1931,12 @@ def main() -> None:
     logger.info("=" * 70)
     set_seed(SEED)
     logger.info(f"Random seed SEED={SEED} (set env V4_SEED to override)")
+    if SMOKE:
+        logger.warning(
+            f"V4_SMOKE=1 - reduced run "
+            f"(folds={N_SPLITS_SURV}/{N_SPLITS_CLF}, "
+            f"deepsurv_epochs={DEEPSURV_EPOCHS}, clf_mlp_epochs={CLF_MLP_EPOCHS})"
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
     METRICS_CSV_DIR.mkdir(parents=True, exist_ok=True)
@@ -1883,13 +2003,15 @@ def main() -> None:
     logger.info("SURVIVAL  --  5-fold CV across feature sets")
     logger.info("=" * 70)
     for emb_key, pca_dim, label in feature_sets:
-        X, feat_names, _state = build_features(
-            train_surv, embedding_key=emb_key, pca_dim=pca_dim,
-        )
-        logger.info(f"[{label}] X shape = {X.shape}")
         surv_summary[label] = survival_cv(
-            X_full=X, t_full=t_arr, e_full=e_arr, cohort_full=cohort_arr,
-            feat_names=feat_names, device=device, emb_label=label,
+            train_adata=train_surv,
+            embedding_key=emb_key,
+            pca_dim=pca_dim,
+            t_full=t_arr,
+            e_full=e_arr,
+            cohort_full=cohort_arr,
+            device=device,
+            emb_label=label,
         )
 
     # ── 5-fold classification CV across feature sets ───────────────────────
@@ -1909,18 +2031,22 @@ def main() -> None:
 
     clf_summary: dict[str, dict] = {}
     for emb_key, pca_dim, label in feature_sets:
-        X, feat_names, _state = build_features(
-            train_clf, embedding_key=emb_key, pca_dim=pca_dim,
-        )
-        logger.info(f"[{label}] X shape = {X.shape}")
         clf_summary[label] = classification_cv(
-            X_full=X, y_full=y_arr, device=device, emb_label=label,
+            train_adata=train_clf,
+            embedding_key=emb_key,
+            pca_dim=pca_dim,
+            y_full=y_arr,
+            device=device,
+            emb_label=label,
         )
         # Keep the cAE-full + Clinical handles for feature-importance viz
         if "cAE-full" in label:
-            last_X_train_global = X
+            X_full_for_imp, feat_names_for_imp, _ = build_features(
+                train_clf, embedding_key=emb_key, pca_dim=pca_dim,
+            )
+            last_X_train_global = X_full_for_imp
             last_y_train_global = y_arr
-            last_feat_names     = feat_names
+            last_feat_names     = feat_names_for_imp
 
     # Persist core CV results immediately (OOD step can fail on schema
     # mismatches between TRAIN and PUB obs; survival/clf results stay safe).
@@ -1938,6 +2064,7 @@ def main() -> None:
         ood_df.to_csv(V4_OOD_CSV, index=False)
 
     save_leaderboard(surv_summary, clf_summary, ood_df)
+    _write_per_pub_best(ood_df)
 
     # ── Visualisations ─────────────────────────────────────────────────────
     logger.info("=" * 70)
@@ -1977,9 +2104,24 @@ def main() -> None:
                 device,
                 label=best_label,
             )
-            viz_km_risk_strata(
-                np.asarray(risk).astype(float), t_arr, e_arr, label=best_label,
-            )
+            risk_arr = np.asarray(risk).astype(float)
+            viz_km_risk_strata(risk_arr, t_arr, e_arr, label=best_label)
+            try:
+                q1, q2 = np.quantile(risk_arr, [1 / 3, 2 / 3])
+                strata = np.where(risk_arr <= q1, "low",
+                         np.where(risk_arr >= q2, "high", "mid"))
+                pd.DataFrame({
+                    "patient_index"   : np.arange(len(risk_arr)),
+                    "risk_score"      : risk_arr,
+                    "tertile"         : strata,
+                    "pfs_time"        : t_arr,
+                    "pfs_event"       : e_arr.astype(int),
+                    "feature_set"     : best_label,
+                    "model"           : best_model_name,
+                }).to_csv(V4_KM_CSV, index=False, float_format="%.6f")
+                logger.info(f"Saved {V4_KM_CSV}")
+            except Exception as exc:
+                logger.warning(f"KM CSV export failed: {exc}")
         except Exception as exc:
             logger.warning(f"KM viz failed: {exc}")
 

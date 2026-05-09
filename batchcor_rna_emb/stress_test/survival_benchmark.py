@@ -26,7 +26,6 @@ from batchcor_rna_emb.stress_test.v4_definitive_pipeline import (
     SEED,
     SURVIVAL_PCA_DIM,
     TRAIN_H5AD,
-    build_features,
     build_survival_arrays,
     run_metrics_tables_notebook,
     save_survival_csv,
@@ -38,7 +37,7 @@ from batchcor_rna_emb.stress_test.v4_definitive_pipeline import (
 def main() -> None:
     set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("survival_benchmark — C-index only | device=%s", device)
+    logger.info(f"survival_benchmark - C-index only | device={device}")
     METRICS_CSV_DIR.mkdir(parents=True, exist_ok=True)
 
     train_ad = sc.read_h5ad(str(TRAIN_H5AD))
@@ -55,22 +54,19 @@ def main() -> None:
     ]
     surv_summary: dict[str, dict] = {}
     for emb_key, pca_dim, label in feature_sets:
-        X, feat_names, _ = build_features(
-            train_surv, embedding_key=emb_key, pca_dim=pca_dim,
-        )
-        logger.info("[%s] feature matrix shape %s", label, X.shape)
         surv_summary[label] = survival_cv(
-            X_full=X,
+            train_adata=train_surv,
+            embedding_key=emb_key,
+            pca_dim=pca_dim,
             t_full=t_arr,
             e_full=e_arr,
             cohort_full=cohort_arr,
-            feat_names=feat_names,
             device=device,
             emb_label=label,
         )
 
     save_survival_csv(surv_summary)
-    logger.success("Done — wrote %s", METRICS_CSV_DIR / "v4_survival_results.csv")
+    logger.success(f"Done - wrote {METRICS_CSV_DIR / 'v4_survival_results.csv'}")
     run_metrics_tables_notebook()
 
 
