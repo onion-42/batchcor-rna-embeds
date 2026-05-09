@@ -261,10 +261,18 @@ def render_figure(
 
     fig, axes = plt.subplots(
         1, 2,
-        figsize       = (14, 6),
-        constrained_layout = True,
+        figsize       = (15, 7.6),
+        constrained_layout = False,
     )
     fig.patch.set_facecolor("white")
+    # Reserve top band for suptitle, bottom band for legend + caption boxes.
+    fig.subplots_adjust(
+        top    = 0.83,
+        bottom = 0.18,
+        left   = 0.035,
+        right  = 0.985,
+        wspace = 0.08,
+    )
 
     # ── shared colour mapping ─────────────────────────────────────────────
     unit_labels = units.values
@@ -316,7 +324,7 @@ def render_figure(
         except Exception:
             pass   # contours are cosmetic; never crash the pipeline
 
-        ax.set_title(title, fontsize=13, fontweight="bold", pad=10, color="#1A1A2E")
+        ax.set_title(title, fontsize=12.5, fontweight="bold", pad=14, color="#1A1A2E")
         ax.set_xlabel(subtitle, fontsize=9.5, color="#555555", labelpad=6)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -360,12 +368,15 @@ def render_figure(
         title    = "BEFORE  —  Raw scGPT Embedding",
         subtitle = "UMAP 2D  ·  coloured by expression-unit convention",
     )
-    # Stamp "UMAP of scGPT_embedding"
+    # obsm key tag: lower-right corner, away from title and KDE contours
     axes[0].text(
-        0.02, 0.98, "scGPT_embedding",
-        transform=axes[0].transAxes, fontsize=8,
-        color="#777777", va="top", ha="left",
+        0.985, 0.02, "obsm['scGPT_embedding']",
+        transform=axes[0].transAxes, fontsize=7.5,
+        color="#888888", va="bottom", ha="right",
         fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                  edgecolor="#DDDDDD", lw=0.6, alpha=0.85),
+        zorder=20,
     )
 
     # ── Right: cAE Corrected ──────────────────────────────────────────────
@@ -375,10 +386,13 @@ def render_figure(
         subtitle = "UMAP 2D  ·  coloured by expression-unit convention",
     )
     axes[1].text(
-        0.02, 0.98, "cAE_embedding",
-        transform=axes[1].transAxes, fontsize=8,
-        color="#777777", va="top", ha="left",
+        0.985, 0.02, "obsm['cAE_embedding']",
+        transform=axes[1].transAxes, fontsize=7.5,
+        color="#888888", va="bottom", ha="right",
         fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                  edgecolor="#DDDDDD", lw=0.6, alpha=0.85),
+        zorder=20,
     )
 
     # ── Shared legend ─────────────────────────────────────────────────────
@@ -392,64 +406,68 @@ def render_figure(
         for u in ["TPM", "Counts"]
         if (unit_labels == u).any()
     ]
+    # Legend goes in the reserved bottom band at y ≈ 0.11 (panels end at 0.18).
     fig.legend(
         handles     = legend_handles,
-        title       = "Expression unit\n(input to scGPT)",
+        title       = "Expression unit  (input to scGPT)",
         title_fontsize = 9.5,
         fontsize    = 9,
-        loc         = "lower center",
+        loc         = "center",
         ncol        = 2,
         frameon     = True,
         framealpha  = 0.92,
         edgecolor   = "#CCCCCC",
-        bbox_to_anchor = (0.5, -0.04),
+        bbox_to_anchor = (0.5, 0.115),
         handlelength  = 1.6,
     )
 
-    # ── Super-title ───────────────────────────────────────────────────────
+    # ── Super-title in the reserved top band ──────────────────────────────
+    # Top of figure is reserved up to y=0.83 for the panel area, so we have
+    # 0.83..1.0 (≈17% of fig height) for the suptitle. Two lines @ 12.5 pt.
     fig.suptitle(
         "Value Binning + cAE Erases the TPM vs Counts Technical Gap\n"
         "scGPT bulk RNA-seq embeddings  ·  TRAIN cohorts  "
-        "(KIRC=TPM  |  Melanoma, NSCLC=Counts)",
-        fontsize  = 12.5,
+        "(KIRC = TPM   |   Melanoma, NSCLC = Counts)",
+        fontsize  = 13.0,
         fontweight= "bold",
         color     = "#1A1A2E",
-        y         = 1.02,
+        y         = 0.955,
     )
 
-    # ── Explanatory caption box ───────────────────────────────────────────
+    # ── Explanatory caption (reserved bottom band) ────────────────────────
     caption = (
         "Density contours mark the TPM (terracotta) and Counts (teal) manifolds.\n"
         "Overlap of contours after cAE correction indicates successful unit-agnostic integration."
     )
     fig.text(
-        0.5, -0.06, caption,
+        0.5, 0.045, caption,
         ha        = "center",
+        va        = "center",
         fontsize  = 8.5,
         color     = "#555555",
         style     = "italic",
-        wrap      = True,
     )
 
-    # ── Mixing-score annotation between panels ────────────────────────────
+    # ── Mixing-score annotation, also in the bottom band ──────────────────
     try:
         raw_score = getattr(axes[0], "_mixing_score", None)
         cae_score = getattr(axes[1], "_mixing_score", None)
         if raw_score is not None and cae_score is not None:
             improvement = (raw_score - cae_score) / raw_score * 100
             ann = (
-                f"Mean TPM→Counts NN distance:\n"
-                f"  Before: {raw_score:.3f}  →  After: {cae_score:.3f}\n"
-                f"  Mixing improvement: {improvement:+.1f}%"
+                f"Mean TPM->Counts NN distance:   "
+                f"Before {raw_score:.3f}   ->   After {cae_score:.3f}   "
+                f"(mixing {improvement:+.1f}%)"
             )
             fig.text(
-                0.5, -0.12, ann,
+                0.5, 0.005, ann,
                 ha        = "center",
+                va        = "bottom",
                 fontsize  = 8,
                 color     = "#333333",
                 fontfamily= "monospace",
                 bbox      = dict(
-                    boxstyle  = "round,pad=0.5",
+                    boxstyle  = "round,pad=0.4",
                     facecolor = "#F0F4F8",
                     edgecolor = "#AABBCC",
                     alpha     = 0.9,
@@ -459,10 +477,12 @@ def render_figure(
         pass
 
     # ── Save ──────────────────────────────────────────────────────────────
+    # NOTE: don't use bbox_inches="tight" -- that re-crops and undoes the
+    # carefully reserved header/footer bands above. The figure is already
+    # sized to include everything within (0..1, 0..1) figure coords.
     fig.savefig(
         str(out_path),
         dpi           = 200,
-        bbox_inches   = "tight",
         facecolor     = "white",
         edgecolor     = "none",
     )
