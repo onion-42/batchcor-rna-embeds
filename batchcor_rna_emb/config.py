@@ -18,20 +18,6 @@ REPORTS_DIR: Path = PROJECT_ROOT / "reports"
 FIGURES_DIR: Path = REPORTS_DIR / "figures"
 MODELS_DIR: Path = PROJECT_ROOT / "models"
 
-# --- Paths (Colab / Google Drive) ---
-COLAB_ROOT_DIR = Path("/content")
-DRIVE_DIR = Path("/content/drive/MyDrive/BG_Internship_group_7")
-
-GENEFORMER_INPUT_DIR = COLAB_ROOT_DIR / "data" / "geneformer_input"
-GENEFORMER_TOKENIZED_DIR = COLAB_ROOT_DIR / "data" / "geneformer_tokenized"
-GENEFORMER_EMBEDDINGS_DIR = COLAB_ROOT_DIR / "data" / "geneformer_embeddings"
-
-MODEL_DIR = Path("/content/Geneformer")
-MODEL_PATH = MODEL_DIR / "Geneformer-V2-104M_CLcancer"
-
-# --- Dataset ---
-DATASET_FILENAME = "NSCLC_Tissue_ICI_Pred.adata.zarr"
-DATASET_PATH = DATA_RAW_DIR / DATASET_FILENAME
 
 # --- AnnData keys ---
 BATCH_COL: str = "RNA_batch"
@@ -45,6 +31,18 @@ TARGET_PREFIX: str = "Target_"
 
 # Embedding keys in .obsm (FM = Foundation Model)
 EMBEDDING_KEY_PATTERN: str = "FM_{model}_embeddings"
+
+# --- Paths (Colab / Google Drive) ---
+GENEFORMER_MODEL_NAME: str = "Geneformer-V2-104M_CLcancer"
+GENEFORMER_EMBEDDING_KEY: str = "FM_Geneformer_embedding"
+GENEFORMER_PCA_KEY: str = "PCA128d_FM_Geneformer_embedding"
+GENEFORMER_UMAP_KEY: str = "UMAP3d_FM_Geneformer_embedding"
+GENEFORMER_METADATA_KEY: str = "FM_Geneformer_metadata"
+GENEFORMER_MODEL_URL: str = (
+    "https://huggingface.co/ctheodoris/Geneformer"
+)
+GENEFORMER_N_PCA: int = 128
+GENEFORMER_N_UMAP: int = 3
 
 # --- COMPASS Foundation Model ---
 COMPASS_MODEL_NAME: str = "FM_COMPASS"
@@ -95,11 +93,6 @@ BATCH_SIZE: int = 16      # lower to 8 if OOM on Colab
 EMBS_LAYER: int = -1      # last hidden layer
 MAX_CELLS: int | None = None  # set an int to limit cells during quick tests
 NPROC: int = 2
-
-# --- UMAP settings ---
-UMAP_N_NEIGHBORS: int = 15
-UMAP_METRIC: str = "cosine"
-UMAP_MIN_DIST: float = 0.3
 
 # --- Imputation ---
 ZERO_IMPUTE_VALUE: float = 0.00001
