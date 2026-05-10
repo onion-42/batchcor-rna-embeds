@@ -13,15 +13,16 @@ and binary Response) on multi-cohort immunotherapy data.
 
 | Task | Best feature set | Best model | Score |
 |---|---|---|---|
-| 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6569 ± 0.015** |
-| 5-fold CV ROC-AUC (Response) | Raw scGPT-PCA32 + Clinical | Stacked ensemble | **0.6260 ± 0.0326** |
+| 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6553 ± 0.011** |
+| 5-fold CV ROC-AUC (Response) | Raw scGPT-PCA32 + Clinical | Stacked ensemble | **0.6358 ± 0.028** |
 | OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | Raw scGPT + Clinical | LightGBM | **0.8937** |
 
 Numbers mirror the latest `metrics_csv/v4_final_leaderboard.csv` and
 `v4_ood_pub_results.csv` from a full `v4_definitive_pipeline` run at
-**`V4_SEED=42`** (default). DeepSurv C-index has run-to-run variance of
-order **0.015**; values **0.66** in two-decimal reporting are consistent
-with rounding.
+**`V4_SEED=42`** (default), with **honest per-fold refits** of PCA / scaler /
+imputer (no validation-fold leakage). DeepSurv C-index has run-to-run
+variance of order **0.015**; values rounding to **0.66** in two-decimal
+reporting are consistent.
 
 The cAE-corrected embeddings beat raw scGPT on every survival model in
 internal CV. The latest OOD export evaluates **Raw scGPT + Clinical**

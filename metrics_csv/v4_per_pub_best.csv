@@ -1,0 +1,4 @@
+pub_dataset,n,best_embedding,best_classifier,roc_auc
+PUB_BLCA,298,Raw scGPT + Clinical,MLP,0.617726
+PUB_ccRCC_ICI,526,Raw scGPT + Clinical,LightGBM,0.893693
+PUB_ccRCC_TKI,447,Raw scGPT + Clinical,LogReg,0.502426

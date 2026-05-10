@@ -1412,11 +1412,16 @@ def viz_cindex_bar(
     ax.set_xticks(x)
     ax.set_xticklabels(embeddings, rotation=14, ha="right")
     ax.set_ylabel("5-fold CV C-index (PFS)")
-    ax.set_title("Survival benchmark — C-index by model and feature set")
-    ax.set_ylim(0.50, 0.85)
+    ax.set_title("Survival benchmark - C-index by model and feature set",
+                 pad=14)
+    ax.set_ylim(0.50, 0.88)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=4, fontsize=8)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    # Legend below the chart so it never collides with the title.
+    ax.legend(
+        loc="upper center", bbox_to_anchor=(0.5, -0.18),
+        ncol=4, fontsize=9, frameon=True,
+    )
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
     out = VIZ_DIR / "v4_cindex_bar.png"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -1450,11 +1455,16 @@ def viz_response_auc_bar(
     ax.set_xticks(x)
     ax.set_xticklabels(embeddings, rotation=12, ha="right")
     ax.set_ylabel("5-fold CV ROC-AUC (Response)")
-    ax.set_title("Response classification — AUC by model and feature set")
+    ax.set_title("Response classification - AUC by model and feature set",
+                 pad=14)
     ax.set_ylim(0.40, 0.90)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.16), ncol=3, fontsize=8)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    # Legend below the chart so it never collides with the title.
+    ax.legend(
+        loc="upper center", bbox_to_anchor=(0.5, -0.18),
+        ncol=4, fontsize=9, frameon=True,
+    )
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
     out = VIZ_DIR / "v4_response_auc_bar.png"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
