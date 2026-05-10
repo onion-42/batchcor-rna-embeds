@@ -1,0 +1,284 @@
+"""Code to create features for modeling.
+
+Covers:
+- HUGO → Ensembl gene ID mapping via MyGene.info
+- Zero-value imputation
+- Pseudo-count preparation for Geneformer tokenization
+- TranscriptomeTokenizer wrapper
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+from pathlib import Path
+from typing import Iterable
+
+import anndata as ad
+import mygene
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+from geneformer import TranscriptomeTokenizer
+from loguru import logger
+
+from batchcor_rna_emb.config import (
+    GENEFORMER_INPUT_DIR,
+    GENEFORMER_TOKENIZED_DIR,
+    NPROC,
+    TOKENIZER_ATTR_DICT,
+    ZERO_IMPUTE_VALUE,
+)
+
+
+# ── 1. Gene symbol → Ensembl ID mapping ───────────────────────────────────────
+
+def fetch_ensembl_ids(
+    genes: Iterable[str],
+    species: str = "human",
+) -> pd.Series:
+    """Fetch Ensembl IDs for HUGO symbols from MyGene.info.
+
+    Parameters
+    ----------
+    genes : Iterable[str]
+        HUGO gene symbols to query.
+    species : str
+        Species string accepted by MyGene.info (default: "human").
+
+    Returns
+    -------
+    pd.Series
+        Index = HUGO symbol, values = Ensembl gene ID (ENSG…).
+        Symbols with no hit are dropped.
+    """
+    mg = mygene.MyGeneInfo()
+
+    # Sanitize: replace empty/NaN with a dummy so the API doesn't crash
+    clean_genes = [
+        str(g).strip() if pd.notna(g) and str(
+            g).strip() != "" else "DUMMY_GENE"
+        for g in genes
+    ]
+
+    df = mg.querymany(
+        clean_genes,
+        species=species,
+        scopes=["symbol"],
+        fields=["ensembl.gene"],
+        as_dataframe=True,
+        df_index=True,
+        verbose=False,
+    )
+
+    if "ensembl" not in df.columns or df.empty:
+        return pd.Series(dtype=object)
+
+    # Drop duplicated index entries (multi-match genes)
+    df = df[~df.index.duplicated(keep="first")]
+
+    def _extract_ensg(val):
+        if isinstance(val, str):
+            return val if val.startswith("ENSG") else None
+        if isinstance(val, dict):
+            return val.get("gene")
+        if isinstance(val, (list, tuple, np.ndarray)):
+            if len(val) > 0:
+                first = val[0]
+                if isinstance(first, dict):
+                    return first.get("gene")
+                if isinstance(first, str):
+                    return first if first.startswith("ENSG") else None
+            return None
+        return None
+
+    return df["ensembl"].apply(_extract_ensg).dropna()
+
+
+def rename_adata_vars_to_ensembl(
+    adata: ad.AnnData,
+    drop_missing: bool = True,
+) -> tuple[ad.AnnData, set[str], set[str]]:
+    """Rename AnnData var_names from HUGO symbols to Ensembl IDs.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object whose var_names hold HUGO/HGNC gene symbols.
+    drop_missing : bool, default=True
+        If True, genes with no resolved Ensembl ID are dropped.
+        Strongly recommended for Geneformer, which only recognises ENSG IDs.
+
+    Returns
+    -------
+    renamed_adata : ad.AnnData
+        AnnData with updated var_names set to Ensembl IDs.
+    found : set[str]
+        HUGO symbols successfully resolved.
+    missing : set[str]
+        HUGO symbols left unresolved.
+    """
+    hugo_genes = adata.var_names.tolist()
+    logger.info(
+        "Querying MyGene to map {} HUGO symbols to Ensembl...", len(hugo_genes))
+
+    ensembl_series = fetch_ensembl_ids(hugo_genes)
+    found = set(ensembl_series.index)
+    missing = set(hugo_genes) - found
+
+    logger.info("Resolved: {} | Missing/Unmapped: {}",
+                len(found), len(missing))
+
+    # Preserve original HUGO symbols in var metadata
+    adata.var["hugo_symbol"] = adata.var_names
+
+    mapper = {gene: ensembl_series.get(gene, gene) for gene in hugo_genes}
+
+    if drop_missing and missing:
+        logger.info("Dropping {} unmapped genes...", len(missing))
+        keep_mask = [g in found for g in adata.var_names]
+        adata = adata[:, keep_mask].copy()
+
+    adata.var_names = [mapper[g] for g in adata.var_names]
+    adata.var_names_make_unique()
+
+    return adata, found, missing
+
+
+# ── 2. Imputation & pseudo-count preparation ───────────────────────────────────
+
+def impute_zeros(expressions: pd.DataFrame, value: float = ZERO_IMPUTE_VALUE) -> pd.DataFrame:
+    """Replace zero values with a small positive constant for log-stability.
+
+    Parameters
+    ----------
+    expressions : pd.DataFrame
+        Cells × genes expression matrix (TPM or similar).
+    value : float
+        Replacement value for zeros (default from config).
+
+    Returns
+    -------
+    pd.DataFrame
+        Imputed DataFrame (copy).
+    """
+    imputed = expressions.copy()
+    imputed.replace(0, value, inplace=True)
+    logger.info("Imputed {} zero values with {}",
+                (expressions == 0).sum().sum(), value)
+    return imputed
+
+
+def prepare_pseudo_counts(adata: ad.AnnData) -> ad.AnnData:
+    """Convert expression matrix to pseudo-integer counts for Geneformer.
+
+    Extracts the dense matrix from adata.X, applies zero imputation,
+    rounds to integers, clips negatives, and writes the result back to
+    adata.X. Also computes ``n_counts`` and sets ``ensembl_id`` in var.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData with expression values in .X (sparse or dense).
+
+    Returns
+    -------
+    ad.AnnData
+        Modified AnnData with integer pseudo-counts in .X, ready for
+        Geneformer tokenization.
+
+    Notes
+    -----
+    Geneformer expects raw integer UMI counts. If the input is TPM,
+    rounding introduces error — but this is the current pipeline approach.
+    Verify your input data type before using this function.
+    """
+    # Extract dense matrix
+    if sp.issparse(adata.X):
+        dense = adata.X.toarray().astype(np.float32)
+    else:
+        dense = np.array(adata.X, dtype=np.float32)
+
+    # Build expression DataFrame and apply imputation
+    expr_df = pd.DataFrame(dense, index=adata.obs_names,
+                           columns=adata.var_names)
+    expr_df = impute_zeros(expr_df)
+
+    # FIX: derive pseudo_counts from the *imputed* matrix (not the original dense)
+    pseudo_counts = np.clip(
+        np.round(expr_df.values), a_min=0, a_max=None
+    ).astype(np.int32)
+
+    adata.X = pseudo_counts
+    adata.var["ensembl_id"] = adata.var_names
+    adata.obs["n_counts"] = adata.X.sum(axis=1)
+
+    logger.info(
+        "Pseudo-counts ready: shape={}, dtype={}, n_counts range=[{:.0f}, {:.0f}]",
+        adata.shape,
+        adata.X.dtype,
+        adata.obs["n_counts"].min(),
+        adata.obs["n_counts"].max(),
+    )
+    return adata
+
+
+# ── 3. Geneformer tokenization ─────────────────────────────────────────────────
+
+def tokenize_adata(
+    adata: ad.AnnData,
+    input_dir: str | Path = GENEFORMER_INPUT_DIR,
+    output_dir: str | Path = GENEFORMER_TOKENIZED_DIR,
+    output_prefix: str = "technical_test",
+    attr_name_dict: dict[str, str] = TOKENIZER_ATTR_DICT,
+    nproc: int = NPROC,
+) -> None:
+    """Save AnnData as h5ad and run Geneformer TranscriptomeTokenizer.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData with integer pseudo-counts in .X and required obs columns.
+    input_dir : Path
+        Directory where the intermediate .h5ad is saved.
+    output_dir : Path
+        Directory where the tokenized HuggingFace dataset is written.
+    output_prefix : str
+        Filename prefix for the tokenized dataset.
+    attr_name_dict : dict
+        Mapping of AnnData obs column names → Geneformer token attribute names.
+        Example: {"RNA_batch": "batch", "Diagnosis": "diagnosis"}
+    nproc : int
+        Number of parallel processes for the tokenizer.
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean stale tokenizer output
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    # Write h5ad for the tokenizer
+    h5ad_path = input_dir / "batch_1_prepared.h5ad"
+    adata.write_h5ad(h5ad_path)
+    logger.info("Saved h5ad to '{}' for tokenization", h5ad_path)
+
+    # Tokenize
+    logger.info(
+        "Initializing TranscriptomeTokenizer with attrs: {}", attr_name_dict)
+    tokenizer = TranscriptomeTokenizer(
+        custom_attr_name_dict=attr_name_dict,
+        nproc=nproc,
+    )
+
+    logger.info("Starting tokenization → '{}'", output_dir)
+    tokenizer.tokenize_data(
+        data_directory=str(input_dir),
+        output_directory=str(output_dir),
+        output_prefix=output_prefix,
+        file_format="h5ad",
+    )
+    logger.info("Tokenization complete. Dataset saved to '{}'", output_dir)

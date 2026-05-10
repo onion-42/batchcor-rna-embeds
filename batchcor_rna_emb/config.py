@@ -18,9 +18,28 @@ REPORTS_DIR: Path = PROJECT_ROOT / "reports"
 FIGURES_DIR: Path = REPORTS_DIR / "figures"
 MODELS_DIR: Path = PROJECT_ROOT / "models"
 
+# --- Paths (Colab / Google Drive) ---
+COLAB_ROOT_DIR = Path("/content")
+DRIVE_DIR = Path("/content/drive/MyDrive/BG_Internship_group_7")
+
+GENEFORMER_INPUT_DIR = COLAB_ROOT_DIR / "data" / "geneformer_input"
+GENEFORMER_TOKENIZED_DIR = COLAB_ROOT_DIR / "data" / "geneformer_tokenized"
+GENEFORMER_EMBEDDINGS_DIR = COLAB_ROOT_DIR / "data" / "geneformer_embeddings"
+
+MODEL_DIR = Path("/content/Geneformer")
+MODEL_PATH = MODEL_DIR / "Geneformer-V2-104M_CLcancer"
+
+# --- Dataset ---
+DATASET_FILENAME = "NSCLC_Tissue_ICI_Pred.adata.zarr"
+DATASET_PATH = DATA_RAW_DIR / DATASET_FILENAME
+
 # --- AnnData keys ---
 BATCH_COL: str = "RNA_batch"
 DIAGNOSIS_COL: str = "Diagnosis"
+RESPONSE_COL: str = "Response"
+OS_COL: str = "OS"
+PFS_COL: str = "PFS"
+THERAPY_COL: str = "Therapy"
 SPLIT_PREFIX: str = "Split_"
 TARGET_PREFIX: str = "Target_"
 
@@ -62,6 +81,28 @@ COHORT_CANCER_CODE: dict[str, str] = {
 # Keys written by correction modules into .obsm
 HARMONY_SUFFIX: str = "_Harmony"
 DANN_SUFFIX: str = "_DANN"
+
+# --- Geneformer tokenizer ---
+TOKENIZER_ATTR_DICT: dict[str, str] = {
+    BATCH_COL: "batch",
+    DIAGNOSIS_COL: "diagnosis",
+}
+EMB_LABEL_COLS: list[str] = list(
+    TOKENIZER_ATTR_DICT.values())  # ["batch", "diagnosis"]
+
+# --- Geneformer / EmbExtractor settings ---
+BATCH_SIZE: int = 16      # lower to 8 if OOM on Colab
+EMBS_LAYER: int = -1      # last hidden layer
+MAX_CELLS: int | None = None  # set an int to limit cells during quick tests
+NPROC: int = 2
+
+# --- UMAP settings ---
+UMAP_N_NEIGHBORS: int = 15
+UMAP_METRIC: str = "cosine"
+UMAP_MIN_DIST: float = 0.3
+
+# --- Imputation ---
+ZERO_IMPUTE_VALUE: float = 0.00001
 
 # --- Stress test ---
 STRESS_LEVELS: list[str] = ["sanity", "weak_ood", "true_ood"]

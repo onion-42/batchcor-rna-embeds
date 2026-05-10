@@ -105,7 +105,8 @@ def _read_zarr_safe(path: Path) -> ad.AnnData:
             logger.debug("Deduplicating categories in Categorical.from_codes")
             unique_cats = cats.drop_duplicates()
             # Remap codes to deduplicated indices
-            old_to_new = {old: unique_cats.get_loc(cats[old]) for old in range(len(cats))}
+            old_to_new = {old: unique_cats.get_loc(
+                cats[old]) for old in range(len(cats))}
             codes = np.array(
                 [old_to_new.get(int(c), c) if c >= 0 else c for c in codes],
                 dtype=np.intp,
@@ -162,7 +163,8 @@ def _fix_zarr_duplicate_categories(zarr_path: Path) -> None:
 
             # Build unique categories and remap codes
             unique_cats = list(dict.fromkeys(cats.tolist()))
-            old_to_new = {old_idx: unique_cats.index(c) for old_idx, c in enumerate(cats.tolist())}
+            old_to_new = {old_idx: unique_cats.index(
+                c) for old_idx, c in enumerate(cats.tolist())}
 
             codes = col["codes"][:]
             new_codes = np.array(
@@ -222,7 +224,8 @@ def load_all_cohorts(data_dir: str | Path, pattern: str = "*.adata.zarr") -> lis
     """
     stores = discover_cohorts(data_dir, pattern)
     if not stores:
-        raise FileNotFoundError(f"No Zarr stores matching '{pattern}' in {data_dir}")
+        raise FileNotFoundError(
+            f"No Zarr stores matching '{pattern}' in {data_dir}")
     return [load_cohort(s) for s in stores]
 
 
@@ -240,4 +243,22 @@ def save_adata_zarr(adata: ad.AnnData, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     adata.write_zarr(path)
-    logger.info("Saved AnnData ({} x {}) to '{}'", adata.n_obs, adata.n_vars, path)
+    logger.info("Saved AnnData ({} x {}) to '{}'",
+                adata.n_obs, adata.n_vars, path)
+
+
+def save_adata_h5ad(adata: ad.AnnData, path: str | Path) -> None:
+    """Save an AnnData object to h5ad format (required by Geneformer tokenizer).
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object to save.
+    path : str or Path
+        Destination .h5ad file path.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    adata.write_h5ad(path)
+    logger.info("Saved AnnData ({} x {}) to '{}'",
+                adata.n_obs, adata.n_vars, path)
