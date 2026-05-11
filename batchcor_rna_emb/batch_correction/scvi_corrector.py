@@ -642,11 +642,11 @@ class CVAEAdvConfig:
 
     latent_dim: int = 64
     hidden_dims: tuple[int, ...] = (512, 256)
-    n_epochs: int = 150
+    n_epochs: int = 100
     batch_size: int = 128
-    lr: float = 1e-3
+    lr: float = 5e-4
     lambda_adv: float = 0.1
-    warmup_fraction: float = 0.3
+    warmup_fraction: float = 0.4
     dropout: float = 0.2
     normalize: bool = True
     grad_clip: float = 0.5
