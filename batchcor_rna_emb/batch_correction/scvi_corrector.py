@@ -649,6 +649,7 @@ class CVAEAdvConfig:
     warmup_fraction: float = 0.3
     dropout: float = 0.2
     normalize: bool = True
+    grad_clip: float = 1.0
     seed: int = 42
 
 
@@ -890,11 +891,15 @@ class CVAEAdvCorrector:
                 loss_recon = recon_loss_fn(x_recon, x_mb)
                 # Adversarial: CE(batch_pred, batch_true)
                 loss_adv = adv_loss_fn(batch_logits, b_int)
-                # Total (GRL handles the sign flip internally)
-                loss = loss_recon + current_lambda * loss_adv
+                # Total: GRL already scales gradient by -λ, so we do NOT
+                # multiply loss_adv by λ again (that would give -λ² effect).
+                loss = loss_recon + loss_adv
 
                 optimizer.zero_grad()
                 loss.backward()
+                nn.utils.clip_grad_norm_(
+                    self.model_.parameters(), cfg.grad_clip,
+                )
                 optimizer.step()
 
                 ep_total += loss.item()
