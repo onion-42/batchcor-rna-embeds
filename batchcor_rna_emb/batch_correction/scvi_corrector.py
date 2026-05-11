@@ -645,11 +645,11 @@ class CVAEAdvConfig:
     n_epochs: int = 150
     batch_size: int = 128
     lr: float = 1e-3
-    lambda_adv: float = 1.0
+    lambda_adv: float = 0.1
     warmup_fraction: float = 0.3
     dropout: float = 0.2
     normalize: bool = True
-    grad_clip: float = 1.0
+    grad_clip: float = 0.5
     seed: int = 42
 
 
@@ -860,7 +860,7 @@ class CVAEAdvCorrector:
 
         optimizer = torch.optim.Adam(self.model_.parameters(), lr=cfg.lr)
         recon_loss_fn = nn.MSELoss()
-        adv_loss_fn = nn.CrossEntropyLoss()
+        adv_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
 
         history = CVAEAdvTrainingHistory()
         warmup_epochs = int(cfg.n_epochs * cfg.warmup_fraction)
