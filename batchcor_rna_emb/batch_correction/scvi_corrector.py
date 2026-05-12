@@ -645,7 +645,7 @@ class CVAEAdvConfig:
     n_epochs: int = 100
     batch_size: int = 128
     lr: float = 5e-4
-    lambda_adv: float = 0.1
+    lambda_adv: float = 0.5
     warmup_fraction: float = 0.4
     dropout: float = 0.2
     normalize: bool = True
