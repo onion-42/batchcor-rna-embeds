@@ -202,9 +202,9 @@ def extract_compass_embeddings(
     if missing_genes:
         logger.debug("Missing genes (first 10): {}", missing_genes[:10])
 
-    # Add missing genes as zero columns
+    # Add missing genes as pseudo-counts to prevent log(0) issues in COMPASS
     for gene in missing_genes:
-        df_tpm[gene] = np.float32(0.0)
+        df_tpm[gene] = np.float32(0.00001)
 
     logger.info("Running COMPASS model.project() with batch_size={}", batch_size)
     dfgs, _dfct = model.project(df_tpm, batch_size=batch_size)
