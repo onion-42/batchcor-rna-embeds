@@ -1365,11 +1365,12 @@ class CVAEAdv2Corrector:
                 loss_recon = recon_loss_fn(x_recon, x_mb)
                 loss_enc = loss_recon
 
-                # Adversarial: encoder wants to MAXIMIZE disc CE
+                # Adversarial: encoder wants discriminator to predict uniform distribution
                 if use_adv:
                     logits_enc = self.disc_(z)  # no detach!
-                    loss_adv_enc = adv_loss_fn(logits_enc, b_int)
-                    loss_enc = loss_enc - current_lambda_adv * loss_adv_enc
+                    uniform_targets = torch.ones_like(logits_enc) / self._n_batches
+                    loss_adv_enc = nn.functional.cross_entropy(logits_enc, uniform_targets)
+                    loss_enc = loss_enc + current_lambda_adv * loss_adv_enc
                     ep_adv_enc += loss_adv_enc.item()
 
                 # MMD: align batch distributions in latent space
