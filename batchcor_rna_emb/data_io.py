@@ -79,10 +79,11 @@ def load_cohort(path: str | Path) -> ad.AnnData:
 
 
 def _read_zarr_safe(path: Path) -> ad.AnnData:
-    """Read Zarr store with automatic duplicate-category handling.
+    """Read Zarr store with maximum cross-version compatibility.
 
-    Temporarily patches ``pd.Categorical.from_codes`` to deduplicate
-    categories before construction, then restores the original.
+    Tries ``ad.read_zarr`` first with duplicate-category patching.
+    On ``IORegistryError`` (anndata/zarr version mismatch), falls back
+    to manual zarr reading that bypasses anndata's IOSpec registry.
 
     Parameters
     ----------
@@ -104,7 +105,6 @@ def _read_zarr_safe(path: Path) -> ad.AnnData:
         if not cats.is_unique:
             logger.debug("Deduplicating categories in Categorical.from_codes")
             unique_cats = cats.drop_duplicates()
-            # Remap codes to deduplicated indices
             old_to_new = {old: unique_cats.get_loc(cats[old]) for old in range(len(cats))}
             codes = np.array(
                 [old_to_new.get(int(c), c) if c >= 0 else c for c in codes],
@@ -116,10 +116,154 @@ def _read_zarr_safe(path: Path) -> ad.AnnData:
     try:
         pd.Categorical.from_codes = _patched_from_codes
         adata = ad.read_zarr(path)
+        return adata
+    except Exception as e:
+        logger.warning("ad.read_zarr failed ({}), using manual fallback", e)
     finally:
         pd.Categorical.from_codes = _original_from_codes
 
+    # ── Fallback: read zarr store manually ──
+    return _read_zarr_manual(path)
+
+
+def _read_zarr_manual(path: Path) -> ad.AnnData:
+    """Read zarr v2 store manually, bypassing anndata's IOSpec registry."""
+    import json
+
+    import numpy as np
+    import zarr
+
+    logger.info("Manual zarr read: {}", path)
+    root = zarr.open(str(path), mode="r")
+
+    # --- X matrix ---
+    X = None
+    if "X" in root:
+        x_elem = root["X"]
+        if isinstance(x_elem, zarr.Array):
+            X = np.array(x_elem)
+        elif hasattr(x_elem, "keys"):
+            # Sparse CSR/CSC stored as group with data/indices/indptr
+            import scipy.sparse as sp
+            data = np.array(x_elem["data"])
+            indices = np.array(x_elem["indices"])
+            indptr = np.array(x_elem["indptr"])
+            attrs = dict(x_elem.attrs) if hasattr(x_elem, "attrs") else {}
+            enc = attrs.get("encoding-type", "csr_matrix")
+            shape = tuple(attrs.get("shape", []))
+            if "csc" in enc:
+                X = sp.csc_matrix((data, indices, indptr), shape=shape)
+            else:
+                X = sp.csr_matrix((data, indices, indptr), shape=shape)
+
+    # --- obs / var DataFrames ---
+    obs = _read_dataframe_from_zarr(root, "obs")
+    var = _read_dataframe_from_zarr(root, "var")
+
+    # --- obsm / varm ---
+    obsm = {}
+    if "obsm" in root:
+        for key in root["obsm"].keys():
+            elem = root["obsm"][key]
+            if isinstance(elem, zarr.Array):
+                obsm[key] = np.array(elem)
+
+    varm = {}
+    if "varm" in root:
+        for key in root["varm"].keys():
+            elem = root["varm"][key]
+            if isinstance(elem, zarr.Array):
+                varm[key] = np.array(elem)
+
+    # --- uns (best-effort) ---
+    uns = {}
+    if "uns" in root:
+        for key in root["uns"].keys():
+            try:
+                elem = root["uns"][key]
+                if isinstance(elem, zarr.Array):
+                    val = np.array(elem)
+                    uns[key] = val.item() if val.ndim == 0 else val
+            except Exception:
+                pass
+
+    adata = ad.AnnData(X=X, obs=obs, var=var, obsm=obsm, varm=varm, uns=uns)
+    logger.info("Manual read OK: {} x {}", adata.n_obs, adata.n_vars)
     return adata
+
+
+def _read_dataframe_from_zarr(root, frame_name: str) -> pd.DataFrame:
+    """Read obs or var DataFrame from zarr store manually."""
+    import json
+
+    import numpy as np
+    import zarr
+
+    if frame_name not in root:
+        return pd.DataFrame()
+
+    frame = root[frame_name]
+    attrs = dict(frame.attrs) if hasattr(frame, "attrs") else {}
+
+    # Get column order from _index and column-order attrs
+    index_col = attrs.get("_index", "_index")
+    col_order = attrs.get("column-order", [])
+
+    data = {}
+    index = None
+
+    for col_name in frame.keys():
+        elem = frame[col_name]
+
+        if hasattr(elem, "keys") and "codes" in elem and "categories" in elem:
+            # Categorical column
+            codes = np.array(elem["codes"])
+            cats = np.array(elem["categories"])
+            # Deduplicate
+            cat_list = list(cats)
+            if len(cat_list) != len(set(cat_list)):
+                unique = list(dict.fromkeys(cat_list))
+                old_to_new = {i: unique.index(c) for i, c in enumerate(cat_list)}
+                codes = np.array([old_to_new.get(int(c), c) if c >= 0 else c for c in codes], dtype=np.intp)
+                cat_list = unique
+            ordered = bool(elem.attrs.get("ordered", False)) if hasattr(elem, "attrs") else False
+            cat_type = pd.CategoricalDtype(categories=cat_list, ordered=ordered)
+            series = pd.Categorical.from_codes(codes, dtype=cat_type)
+            data[col_name] = series
+        elif isinstance(elem, zarr.Array):
+            arr = np.array(elem)
+            # Check for null encoding
+            elem_attrs = dict(elem.attrs) if hasattr(elem, "attrs") else {}
+            enc_type = elem_attrs.get("encoding-type", "")
+            if enc_type == "null":
+                continue  # Skip null-encoded arrays
+            data[col_name] = arr
+        else:
+            continue
+
+        if col_name == index_col:
+            index = data.pop(col_name)
+
+    # Build DataFrame with column order
+    if col_order:
+        ordered_data = {}
+        for c in col_order:
+            if c in data:
+                ordered_data[c] = data[c]
+        # Add any remaining
+        for c in data:
+            if c not in ordered_data:
+                ordered_data[c] = data[c]
+        data = ordered_data
+
+    df = pd.DataFrame(data)
+    if index is not None:
+        if hasattr(index, "tolist"):
+            df.index = pd.Index(index)
+        else:
+            df.index = pd.Index(list(index))
+
+    return df
 
 
 def _fix_zarr_duplicate_categories(zarr_path: Path) -> None:
