@@ -9,8 +9,8 @@ Covers:
 
 from __future__ import annotations
 
-import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -19,12 +19,9 @@ import mygene
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from geneformer import TranscriptomeTokenizer
 from loguru import logger
 
 from batchcor_rna_emb.config import (
-    GENEFORMER_INPUT_DIR,
-    GENEFORMER_TOKENIZED_DIR,
     NPROC,
     TOKENIZER_ATTR_DICT,
     ZERO_IMPUTE_VALUE,
@@ -120,7 +117,9 @@ def rename_adata_vars_to_ensembl(
     """
     hugo_genes = adata.var_names.tolist()
     logger.info(
-        "Querying MyGene to map {} HUGO symbols to Ensembl...", len(hugo_genes))
+        "Querying MyGene to map {} HUGO symbols to Ensembl...", len(
+            hugo_genes),
+    )
 
     ensembl_series = fetch_ensembl_ids(hugo_genes)
     found = set(ensembl_series.index)
@@ -147,7 +146,10 @@ def rename_adata_vars_to_ensembl(
 
 # ── 2. Imputation & pseudo-count preparation ───────────────────────────────────
 
-def impute_zeros(expressions: pd.DataFrame, value: float = ZERO_IMPUTE_VALUE) -> pd.DataFrame:
+def impute_zeros(
+    expressions: pd.DataFrame,
+    value: float = ZERO_IMPUTE_VALUE,
+) -> pd.DataFrame:
     """Replace zero values with a small positive constant for log-stability.
 
     Parameters
@@ -163,9 +165,9 @@ def impute_zeros(expressions: pd.DataFrame, value: float = ZERO_IMPUTE_VALUE) ->
         Imputed DataFrame (copy).
     """
     imputed = expressions.copy()
+    n_zeros = int((expressions == 0).sum().sum())
     imputed.replace(0, value, inplace=True)
-    logger.info("Imputed {} zero values with {}",
-                (expressions == 0).sum().sum(), value)
+    logger.info("Imputed {} zero values with {}", n_zeros, value)
     return imputed
 
 
@@ -193,20 +195,17 @@ def prepare_pseudo_counts(adata: ad.AnnData) -> ad.AnnData:
     rounding introduces error — but this is the current pipeline approach.
     Verify your input data type before using this function.
     """
-    # Extract dense matrix
     if sp.issparse(adata.X):
         dense = adata.X.toarray().astype(np.float32)
     else:
         dense = np.array(adata.X, dtype=np.float32)
 
-    # Build expression DataFrame and apply imputation
     expr_df = pd.DataFrame(dense, index=adata.obs_names,
                            columns=adata.var_names)
     expr_df = impute_zeros(expr_df)
 
-    # FIX: derive pseudo_counts from the *imputed* matrix (not the original dense)
     pseudo_counts = np.clip(
-        np.round(expr_df.values), a_min=0, a_max=None
+        np.round(expr_df.values), a_min=0, a_max=None,
     ).astype(np.int32)
 
     adata.X = pseudo_counts
@@ -227,58 +226,84 @@ def prepare_pseudo_counts(adata: ad.AnnData) -> ad.AnnData:
 
 def tokenize_adata(
     adata: ad.AnnData,
-    input_dir: str | Path = GENEFORMER_INPUT_DIR,
-    output_dir: str | Path = GENEFORMER_TOKENIZED_DIR,
-    output_prefix: str = "technical_test",
+    output_dir: str | Path,
+    output_prefix: str = "geneformer_tokenized",
     attr_name_dict: dict[str, str] = TOKENIZER_ATTR_DICT,
     nproc: int = NPROC,
-) -> None:
+) -> Path:
     """Save AnnData as h5ad and run Geneformer TranscriptomeTokenizer.
+
+    The h5ad is written to a temporary directory that is cleaned up
+    automatically after tokenization. The resulting HuggingFace dataset
+    is written to ``output_dir``.
 
     Parameters
     ----------
     adata : ad.AnnData
         AnnData with integer pseudo-counts in .X and required obs columns.
-    input_dir : Path
-        Directory where the intermediate .h5ad is saved.
-    output_dir : Path
+    output_dir : str or Path
         Directory where the tokenized HuggingFace dataset is written.
+        Existing contents are removed before writing.
     output_prefix : str
         Filename prefix for the tokenized dataset.
     attr_name_dict : dict
         Mapping of AnnData obs column names → Geneformer token attribute names.
-        Example: {"RNA_batch": "batch", "Diagnosis": "diagnosis"}
+        Example: ``{"RNA_batch": "batch", "Diagnosis": "diagnosis"}``
     nproc : int
         Number of parallel processes for the tokenizer.
-    """
-    input_dir = Path(input_dir)
-    output_dir = Path(output_dir)
 
-    input_dir.mkdir(parents=True, exist_ok=True)
+    Returns
+    -------
+    Path
+        Path to the folder containing the tokenized HuggingFace dataset
+        (the subfolder inside ``output_dir`` with ``dataset_info.json``).
+
+    Raises
+    ------
+    RuntimeError
+        If no HuggingFace dataset folder is found after tokenization.
+    """
+    from geneformer import TranscriptomeTokenizer
+
+    output_dir = Path(output_dir)
 
     # Clean stale tokenizer output
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    # Write h5ad for the tokenizer
-    h5ad_path = input_dir / "batch_1_prepared.h5ad"
-    adata.write_h5ad(h5ad_path)
-    logger.info("Saved h5ad to '{}' for tokenization", h5ad_path)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        h5ad_path = Path(tmpdir) / "cohort.h5ad"
+        adata.write_h5ad(h5ad_path)
+        logger.info("Saved temporary h5ad for tokenization: {}", h5ad_path)
 
-    # Tokenize
-    logger.info(
-        "Initializing TranscriptomeTokenizer with attrs: {}", attr_name_dict)
-    tokenizer = TranscriptomeTokenizer(
-        custom_attr_name_dict=attr_name_dict,
-        nproc=nproc,
-    )
+        logger.info(
+            "Initializing TranscriptomeTokenizer with attrs: {}", attr_name_dict,
+        )
+        tokenizer = TranscriptomeTokenizer(
+            custom_attr_name_dict=attr_name_dict,
+            nproc=nproc,
+        )
 
-    logger.info("Starting tokenization → '{}'", output_dir)
-    tokenizer.tokenize_data(
-        data_directory=str(input_dir),
-        output_directory=str(output_dir),
-        output_prefix=output_prefix,
-        file_format="h5ad",
-    )
-    logger.info("Tokenization complete. Dataset saved to '{}'", output_dir)
+        logger.info("Starting tokenization → '{}'", output_dir)
+        tokenizer.tokenize_data(
+            data_directory=str(Path(tmpdir)),
+            output_directory=str(output_dir),
+            output_prefix=output_prefix,
+            file_format="h5ad",
+        )
+
+    # Locate the produced dataset subfolder
+    dataset_folders = [
+        p for p in output_dir.iterdir()
+        if p.is_dir() and (p / "dataset_info.json").exists()
+    ]
+    if not dataset_folders:
+        raise RuntimeError(
+            f"Tokenization produced no HuggingFace dataset folder in {output_dir}. "
+            "Check TranscriptomeTokenizer output above for errors."
+        )
+
+    dataset_path = dataset_folders[0]
+    logger.info("Tokenization complete. Dataset saved to '{}'", dataset_path)
+    return dataset_path
