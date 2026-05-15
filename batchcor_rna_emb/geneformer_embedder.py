@@ -141,6 +141,7 @@ def extract_geneformer_embeddings(
     batch_size: int = BATCH_SIZE,
     max_cells: int | None = MAX_CELLS,
     nproc: int = NPROC,
+    device: str = "cpu",
 ) -> tuple[np.ndarray, pd.DataFrame]:
     """Извлекает per-cell mean-pool embeddings из Geneformer.
 
@@ -164,6 +165,8 @@ def extract_geneformer_embeddings(
         Если задан — ограничивает число клеток (для тестов).
     nproc : int
         Число параллельных воркеров для EmbExtractor.
+    device : str
+        Устройство для inference (``"cpu"`` или ``"cuda"``).
 
     Returns
     -------
@@ -177,7 +180,6 @@ def extract_geneformer_embeddings(
 
     model_path = Path(model_path)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("Using device: {}", device)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -213,6 +215,7 @@ def extract_geneformer_embeddings(
             labels_to_plot=[],
             forward_batch_size=batch_size,
             nproc=nproc,
+            device=device,
         )
 
         logger.info(
@@ -385,6 +388,7 @@ def run_geneformer_pipeline(
     batch_size: int = BATCH_SIZE,
     max_cells: int | None = MAX_CELLS,
     nproc: int = NPROC,
+    device: str = "cpu",
     embedding_key: str = GENEFORMER_EMBEDDING_KEY,
     pca_key: str = GENEFORMER_PCA_KEY,
     umap_key: str = GENEFORMER_UMAP_KEY,
@@ -417,6 +421,8 @@ def run_geneformer_pipeline(
         Ограничение числа клеток (для тестов).
     nproc : int
         Число параллельных воркеров.
+    device : str
+        Устройство для inference (``"cpu"`` / ``"cuda"``).
     embedding_key : str
         Ключ для raw эмбеддингов в ``.obsm``.
     pca_key : str
@@ -444,6 +450,7 @@ def run_geneformer_pipeline(
     logger.info("GENEFORMER EMBEDDING PIPELINE START")
     logger.info("Cohort: {} samples × {} genes", adata.n_obs, adata.n_vars)
     logger.info("Model: {}", model_path.name)
+    logger.info("Device: {}", device)
     logger.info("=" * 60)
 
     # 1–2. Токенизация + извлечение эмбеддингов
@@ -455,6 +462,7 @@ def run_geneformer_pipeline(
         batch_size=batch_size,
         max_cells=max_cells,
         nproc=nproc,
+        device=device,
     )
     adata.obsm[embedding_key] = embeddings
 
