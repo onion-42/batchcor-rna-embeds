@@ -159,13 +159,20 @@ def rename_adata_vars_to_ensembl(
     # Preserve original HUGO symbols in var metadata
     adata.var["hugo_symbol"] = adata.var_names
 
-    mapper = {gene: ensembl_series.get(gene, gene) for gene in hugo_genes}
-
     if drop_missing and missing:
         logger.info("Dropping {} unmapped genes...", len(missing))
-        keep_mask = [g in found for g in adata.var_names]
-        adata = adata[:, keep_mask].copy()
+        keep_idx = [i for i, g in enumerate(adata.var_names) if g in found]
 
+        # Slice the sparse matrix column-wise without a full .copy() —
+        # avoids doubling peak RAM on large cohorts.
+        if sp.issparse(adata.X):
+            adata.X = adata.X[:, keep_idx]  # returns a new sparse view/copy
+        else:
+            adata.X = adata.X[:, keep_idx]
+
+        adata._inplace_subset_var(adata.var_names[keep_idx])
+
+    mapper = {gene: ensembl_series.get(gene, gene) for gene in adata.var_names}
     adata.var_names = [mapper[g] for g in adata.var_names]
     adata.var_names_make_unique()
 
