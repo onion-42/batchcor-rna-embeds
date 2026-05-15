@@ -171,17 +171,28 @@ def impute_zeros(
     return imputed
 
 
-def prepare_pseudo_counts(adata: ad.AnnData) -> ad.AnnData:
+def prepare_pseudo_counts(
+    adata: ad.AnnData,
+    device: str = "cpu",
+) -> ad.AnnData:
     """Convert expression matrix to pseudo-integer counts for Geneformer.
 
     Extracts the dense matrix from adata.X, applies zero imputation,
     rounds to integers, clips negatives, and writes the result back to
     adata.X. Also computes ``n_counts`` and sets ``ensembl_id`` in var.
 
+    When ``device`` is ``"cuda"``, the rounding and clipping are performed
+    on GPU via torch tensors for faster throughput on large matrices.
+    The result is always returned as a CPU numpy int32 array (required by
+    AnnData and the downstream Geneformer tokenizer).
+
     Parameters
     ----------
     adata : ad.AnnData
         AnnData with expression values in .X (sparse or dense).
+    device : str
+        Torch device string (``"cpu"`` or ``"cuda"``). Passed from the
+        top-level pipeline so the same device flag controls everything.
 
     Returns
     -------
@@ -195,18 +206,24 @@ def prepare_pseudo_counts(adata: ad.AnnData) -> ad.AnnData:
     rounding introduces error — but this is the current pipeline approach.
     Verify your input data type before using this function.
     """
+    import torch
+
+    logger.info("prepare_pseudo_counts: device='{}'", device)
+
     if sp.issparse(adata.X):
         dense = adata.X.toarray().astype(np.float32)
     else:
         dense = np.array(adata.X, dtype=np.float32)
 
+    # Zero imputation (CPU — fast, no large alloc benefit on GPU)
     expr_df = pd.DataFrame(dense, index=adata.obs_names,
                            columns=adata.var_names)
     expr_df = impute_zeros(expr_df)
 
-    pseudo_counts = np.clip(
-        np.round(expr_df.values), a_min=0, a_max=None,
-    ).astype(np.int32)
+    # Round + clip on GPU when available, fall back to numpy otherwise
+    t = torch.tensor(expr_df.values, dtype=torch.float32, device=device)
+    t = torch.clamp(torch.round(t), min=0)
+    pseudo_counts = t.cpu().numpy().astype(np.int32)
 
     adata.X = pseudo_counts
     adata.var["ensembl_id"] = adata.var_names
