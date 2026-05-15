@@ -30,11 +30,34 @@ from batchcor_rna_emb.config import (
 
 # ── 1. Gene symbol → Ensembl ID mapping ───────────────────────────────────────
 
+def _extract_ensg(val) -> str | None:
+    """Extract a single ENSG ID from a MyGene.info ensembl field value."""
+    if isinstance(val, str):
+        return val if val.startswith("ENSG") else None
+    if isinstance(val, dict):
+        return val.get("gene")
+    if isinstance(val, (list, tuple, np.ndarray)):
+        if len(val) > 0:
+            first = val[0]
+            if isinstance(first, dict):
+                return first.get("gene")
+            if isinstance(first, str):
+                return first if first.startswith("ENSG") else None
+        return None
+    return None
+
+
 def fetch_ensembl_ids(
     genes: Iterable[str],
     species: str = "human",
+    batch_size: int = 500,
 ) -> pd.Series:
-    """Fetch Ensembl IDs for HUGO symbols from MyGene.info.
+    """Fetch Ensembl IDs for HUGO symbols from MyGene.info in batches.
+
+    Queries are issued as raw list responses (not DataFrames) to avoid the
+    memory spike that ``as_dataframe=True`` causes on 10k–20k gene inputs —
+    mygene builds the full DataFrame including multi-match rows before
+    returning, which can 2–3× the peak allocation and crash Colab.
 
     Parameters
     ----------
@@ -42,6 +65,8 @@ def fetch_ensembl_ids(
         HUGO gene symbols to query.
     species : str
         Species string accepted by MyGene.info (default: "human").
+    batch_size : int
+        Number of genes per API request (default: 500).
 
     Returns
     -------
@@ -51,45 +76,48 @@ def fetch_ensembl_ids(
     """
     mg = mygene.MyGeneInfo()
 
+    gene_list = list(genes)
+
     # Sanitize: replace empty/NaN with a dummy so the API doesn't crash
     clean_genes = [
         str(g).strip() if pd.notna(g) and str(
             g).strip() != "" else "DUMMY_GENE"
-        for g in genes
+        for g in gene_list
     ]
 
-    df = mg.querymany(
-        clean_genes,
-        species=species,
-        scopes=["symbol"],
-        fields=["ensembl.gene"],
-        as_dataframe=True,
-        df_index=True,
-        verbose=False,
+    n_batches = (len(clean_genes) + batch_size - 1) // batch_size
+    logger.info(
+        "Querying MyGene.info: {} genes in {} batches of {}",
+        len(clean_genes), n_batches, batch_size,
     )
 
-    if "ensembl" not in df.columns or df.empty:
-        return pd.Series(dtype=object)
+    mapping: dict[str, str] = {}  # hugo_symbol → ENSG ID
+    for i in range(0, len(clean_genes), batch_size):
+        batch = clean_genes[i: i + batch_size]
+        batch_num = i // batch_size + 1
+        logger.debug("Batch {}/{} ({} genes)",
+                     batch_num, n_batches, len(batch))
 
-    # Drop duplicated index entries (multi-match genes)
-    df = df[~df.index.duplicated(keep="first")]
+        # as_dataframe=False returns a plain list of dicts — much lower peak RAM
+        hits: list[dict] = mg.querymany(
+            batch,
+            species=species,
+            scopes=["symbol"],
+            fields=["ensembl.gene"],
+            as_dataframe=False,
+            verbose=False,
+        )
 
-    def _extract_ensg(val):
-        if isinstance(val, str):
-            return val if val.startswith("ENSG") else None
-        if isinstance(val, dict):
-            return val.get("gene")
-        if isinstance(val, (list, tuple, np.ndarray)):
-            if len(val) > 0:
-                first = val[0]
-                if isinstance(first, dict):
-                    return first.get("gene")
-                if isinstance(first, str):
-                    return first if first.startswith("ENSG") else None
-            return None
-        return None
+        for hit in hits:
+            query = hit.get("query", "")
+            if not query or query == "DUMMY_GENE" or "notfound" in hit:
+                continue
+            ensg = _extract_ensg(hit.get("ensembl"))
+            # Keep first hit per symbol (skip duplicates)
+            if ensg and query not in mapping:
+                mapping[query] = ensg
 
-    return df["ensembl"].apply(_extract_ensg).dropna()
+    return pd.Series(mapping)
 
 
 def rename_adata_vars_to_ensembl(
