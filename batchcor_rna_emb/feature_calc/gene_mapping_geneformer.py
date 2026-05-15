@@ -161,16 +161,15 @@ def rename_adata_vars_to_ensembl(
 
     if drop_missing and missing:
         logger.info("Dropping {} unmapped genes...", len(missing))
-        keep_idx = [i for i, g in enumerate(adata.var_names) if g in found]
+        keep_idx = np.array(
+            [i for i, g in enumerate(adata.var_names) if g in found])
 
-        # Slice the sparse matrix column-wise without a full .copy() —
-        # avoids doubling peak RAM on large cohorts.
-        if sp.issparse(adata.X):
-            adata.X = adata.X[:, keep_idx]  # returns a new sparse view/copy
-        else:
-            adata.X = adata.X[:, keep_idx]
-
+        # Subset var metadata in-place first so adata.shape updates,
+        # then assign the matching X slice — avoids the shape mismatch
+        # that occurs if X is assigned before AnnData knows the new var count.
+        new_X = adata.X[:, keep_idx]  # compute slice before mutating adata
         adata._inplace_subset_var(adata.var_names[keep_idx])
+        adata.X = new_X
 
     mapper = {gene: ensembl_series.get(gene, gene) for gene in adata.var_names}
     adata.var_names = [mapper[g] for g in adata.var_names]
