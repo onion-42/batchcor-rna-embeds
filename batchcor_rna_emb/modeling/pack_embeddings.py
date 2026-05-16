@@ -209,8 +209,28 @@ def pack_cohort(raw_path: Path) -> None:
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pack scGPT .npy into processed .h5ad")
+    parser.add_argument(
+        "--cohort",
+        action="append",
+        default=None,
+        help="Pack only these zarr folder names",
+    )
+    args = parser.parse_args()
+
     logger.info("Starting embedding packaging script")
     raw_cohorts = find_raw_cohorts()
+    if args.cohort:
+        def _resolve(name: str) -> str:
+            n = name.removesuffix(".zarr")
+            if not n.endswith(".adata"):
+                n = f"{n}.adata"
+            return f"{n}.zarr"
+
+        wanted = {_resolve(c) for c in args.cohort}
+        raw_cohorts = [p for p in raw_cohorts if p.name in wanted]
     if not raw_cohorts:
         return 1
 

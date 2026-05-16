@@ -1,42 +1,58 @@
 # BatchCorrect_RNA_embeds
 
-End-to-end pipeline for evaluating how RNA-foundation-model embeddings
-(scGPT) plus a Conditional Autoencoder batch correction (cAE) plus rich
-clinical features predict clinical endpoints (Progression-Free Survival
-and binary Response) on multi-cohort immunotherapy data.
+End-to-end pipeline for evaluating how RNA foundation-model embeddings (scGPT),
+diagnosis-conditioned conditional autoencoder (cAE) batch correction, and clinical
+features predict **35-month overall survival** (`OS_bin_35months`) on multi-cohort
+immunotherapy and public oncology datasets.
 
 **BG Internship 2026 — Group 7.**
 
 ---
 
-## Headline result
+## Executive summary (v5 strict pipeline)
 
-| Task | Best feature set | Best model | Score |
-|---|---|---|---|
-| 5-fold CV C-index (PFS) | cAE-full + Clinical | DeepSurv MLP | **0.6553 ± 0.011** |
-| 5-fold CV ROC-AUC (Response) | Raw scGPT-PCA32 + Clinical | Stacked ensemble | **0.6358 ± 0.028** |
-| OOD ROC-AUC on PUB_ccRCC_ICI (n=526) | Raw scGPT + Clinical | LightGBM | **0.8937** |
+The **v5 strict pipeline** is the authoritative evaluation for this repository. It
+addresses curator feedback on leakage, target harmonisation, and honest
+out-of-distribution (OOD) reporting.
 
-Numbers mirror the latest `metrics_csv/v4_final_leaderboard.csv` and
-`v4_ood_pub_results.csv` from a full `v4_definitive_pipeline` run at
-**`V4_SEED=42`** (default), with **honest per-fold refits** of PCA / scaler /
-imputer (no validation-fold leakage). DeepSurv C-index has run-to-run
-variance of order **0.015**; values rounding to **0.66** in two-decimal
-reporting are consistent.
+### What makes v5 rigorous
 
-The cAE-corrected embeddings beat raw scGPT on every survival model in
-internal CV. The latest OOD export evaluates **Raw scGPT + Clinical**
-only (public cohorts ship without `cAE_embedding_OOD`, so the cAE OOD
-branch is skipped); on held-out ccRCC ICI, LightGBM reaches **AUC ≈ 0.88**.
+1. **cAE inside 5-fold CV** — The diagnosis-conditioned cAE is trained **only on each
+   CV training fold**, then used to correct that fold’s train and validation embeddings.
+   There is no global cAE fit across all training data before cross-validation.
 
-**Two ways to view the metrics:**
+2. **Target harmonisation** — All cohorts expose a single binary endpoint
+   `OS_bin_35months` (35-month OS landmark), computed by `harmonize_targets.py` from
+   harmonised OS/PFS time and event columns.
 
-| Format | Path | Best for |
-|---|---|---|
-| Interactive notebook | `metrics/metrics_tables.ipynb` | Exploring tables in Jupyter / VS Code |
-| Styled HTML report | `metrics/metrics_tables.html` *(auto-built)* | Sharing — open in any browser, no Jupyter needed |
+3. **No train/test duplicates** — `PUB_KIRC_ICI_combined` is **excluded** from unified
+   data and OOD metrics because it is **identical** to `KIRC_Tissue_ICI_Pred` (n=1172,
+   same patient IDs). `build_unified_adata.py` also drops any test row whose index
+   already appears in train.
 
-Both are regenerated automatically at the end of every `v4_definitive_pipeline` run.
+4. **Per-cohort OOD only** — After CV, a final model is trained on labelled train
+   patients; each **test cohort is scored separately** (no pooled BRCA + kidney AUC).
+
+5. **Feature hygiene** — PCA on embeddings without `StandardScaler`; clinical/Kassandra
+   numerics scaled only; survival/response columns blocklisted from `X`.
+
+### Headline results
+
+| Metric | Value |
+|--------|------:|
+| **5-fold CV ROC-AUC** (train ICI, `OS_bin_35months`) | **0.639 ± 0.024** |
+| **OOD ROC-AUC — PUB_BRCA_SCANB** (zero-shot, BRCA not in train) | **0.544** |
+
+**PUB_BRCA_SCANB (~0.54):** Expected for **cross-tissue zero-shot** transfer. Training
+cohorts are ICI-treated KIRC, melanoma, and NSCLC only; SCANB is breast cancer with a
+different survival landscape. Modest AUC above chance reflects partial signal in shared
+clinical and embedding structure, not in-distribution performance.
+
+**Note on PUB_KIRC_ICI_combined:** An earlier pooled evaluation reported ~0.77 OOD AUC
+on this cohort; that was **inflated by duplicate patients** already in the training set.
+v5 correctly excludes this cohort from OOD tables.
+
+**Artifacts:** `metrics_csv/v5_os_bin35_*.csv` · `visualizations/v5_final_ood_performance.png`
 
 ---
 
@@ -48,57 +64,42 @@ python -m venv batcor_env
 pip install -e .
 ```
 
-Required heavy dependencies: PyTorch, scanpy, lifelines, scikit-survival,
-xgboost, lightgbm, loguru, matplotlib, seaborn, plotly. All listed in
-`pyproject.toml`.
+Dependencies: PyTorch, scanpy, anndata, lightgbm, scikit-learn, loguru, matplotlib.
+See `pyproject.toml`.
 
 ---
 
-## Reproduce the entire pipeline
+## Reproduce the v5 pipeline
 
 ```powershell
-# 1. Build per-cohort H5AD files from raw zarr + scGPT embeddings
+# 1. Harmonise OS_bin_35months on all raw zarr cohorts
+python -m batchcor_rna_emb.modeling.harmonize_targets
+
+# 2. Per-cohort h5ad (if not already built)
 python -m batchcor_rna_emb.modeling.pack_embeddings
 
-# 2. Train the cAE (v3 balanced: latent=160, patience=20, lr=8e-4)
-python -m batchcor_rna_emb.batch_correction.run_cae_correction
+# 3. Unified AnnData (train + test, deduplicated)
+python -m batchcor_rna_emb.modeling.build_unified_adata
 
-# 3. Generate the batch-correction visualisations
-jupyter nbconvert --to notebook --execute --inplace `
-    visualizations\visualizations_cae_correction.ipynb
+# 4. Strict CV + per-cohort OOD (~2 min CPU)
+python -m batchcor_rna_emb.stress_test.v5_strict_pipeline
 
-# 4a. Survival / C-index only (~same runtime subset); writes survival CSV only
-python -m batchcor_rna_emb.stress_test.survival_benchmark
+# 5. Summary figure
+python visualizations/plot_v5_metrics.py
 
-# 4b. Run the full v4 evaluation pipeline (~20 min on CPU)
-python -m batchcor_rna_emb.stress_test.v4_definitive_pipeline
-
-# 5. (Optional) Re-execute metrics + SOTA visualisations notebooks
-#    (the v4 pipeline already re-executes the metrics notebook on exit).
-jupyter nbconvert --to notebook --execute --inplace `
-    --ExecutePreprocessor.kernel_name=batcor_env `
-    metrics/metrics_tables.ipynb
-jupyter nbconvert --to notebook --execute --inplace `
-    --ExecutePreprocessor.kernel_name=batcor_env `
-    visualizations/visualizations_SOTA_analytics.ipynb
+# Optional: slim export zip for merging embeddings with other groups
+python scripts/export_embeddings_for_merge.py
 ```
 
-If you ever need to rebuild the SOTA notebook from scratch (not just
-re-execute it), run `python scripts/build_sota_notebook.py` -- it
-regenerates the cell structure deterministically. The existing
-notebook is the source of truth and ships with all plots embedded.
+Environment flags:
 
-Everything writes to **`metrics_csv/`** (numbers), **`metrics/`** (this notebook only),
-and **`visualizations/`**. The default random seed is **42** across numpy, torch,
-scikit-learn, lifelines, sksurv, xgboost and lightgbm — set **`V4_SEED`** to override
-for multi-seed sweeps without editing code. Set **`V4_SMOKE=1`** to collapse the
-pipeline to 2 folds + 10-epoch DeepSurv/MLP for quick iteration (~6 min vs ~24 min).
+| Variable | Effect |
+|----------|--------|
+| `V5_SEED` | RNG seed (default 42) |
+| `V5_SMOKE=1` | 2-fold CV, fewer cAE epochs (quick dev) |
+| `V5_UNIFIED` | Path to unified h5ad override |
 
-CV honesty: every fold of `survival_cv` and `classification_cv` re-fits the PCA
-basis, `StandardScaler`, clinical-feature medians, and one-hot category dictionary
-on training rows only and transforms the held-out rows with the captured fit-state
-— no leakage of validation samples into the embedding/scaler/imputer (matches the
-pattern already used by `run_75_acceptance_criterion.py`).
+Full metric narrative: [`metrics/ALL_METRICS_SUMMARY.md`](metrics/ALL_METRICS_SUMMARY.md).
 
 ---
 
@@ -106,138 +107,61 @@ pattern already used by `run_75_acceptance_criterion.py`).
 
 ```
 batchcor-rna-embeds/
-├── README.md                       ← (this file)
-├── pyproject.toml                  ← installable package metadata
-│
-├── batchcor_rna_emb/               ← main Python package
-│   ├── batch_correction/
-│   │   ├── cae.py                  ← Conditional AutoEncoder (frozen)
-│   │   └── run_cae_correction.py   ← v3 balanced training
+├── README.md
+├── metrics/
+│   └── ALL_METRICS_SUMMARY.md          ← v5 results narrative
+├── batchcor_rna_emb/
 │   ├── modeling/
-│   │   ├── pack_embeddings.py      ← raw zarr → H5AD
-│   │   └── scgpt_embeddings.py     ← scGPT inference (frozen)
+│   │   ├── cohort_registry.py          ← train / test / duplicate exclusions
+│   │   ├── harmonize_targets.py        ← OS_bin_35months
+│   │   ├── build_unified_adata.py      ← UNIFIED_Cohort.h5ad
+│   │   ├── pack_embeddings.py
+│   │   └── scgpt_embeddings.py
+│   ├── batch_correction/
+│   │   └── cae.py                      ← diagnosis-conditioned cAE
 │   └── stress_test/
-│       ├── README.md               ← survival vs full pipeline
-│       ├── survival_benchmark.py   ← C-index–only benchmark
-│       └── v4_definitive_pipeline.py    ← full evaluation entry-point
-│
-├── data/processed/                 ← H5AD inputs (TRAIN + 3 PUB cohorts)
-├── checkpoints/cae_trained.pt      ← trained cAE weights (v3)
-├── pretrained/                     ← scGPT pretrained weights
-│
-├── metrics_csv/                    ← all CSV + batch_correction_metrics.json
-│   ├── v4_survival_results.csv
-│   ├── v4_cindex_survival_matrix.csv   ← wide table: feature set × survival model (5-fold CV mean C-index)
-│   ├── v4_classification_results.csv
-│   ├── v4_response_auc_matrix.csv      ← wide table: feature set × classifier (5-fold CV mean ROC-AUC)
-│   ├── v4_ood_pub_results.csv
-│   ├── v4_per_pub_best.csv             ← one-row-per-PUB best (embedding × classifier)
-│   ├── v4_km_risk_scores.csv           ← per-patient risk scores feeding the KM plot
-│   ├── v4_final_leaderboard.csv
-│   └── batch_correction_metrics.{csv,json}
-│
-├── metrics/                        ← interactive metric dashboard
-│   ├── metrics_tables.ipynb        ← Jupyter view (committed)
-│   └── metrics_tables.html         ← styled stand-alone report (gitignored,
-│                                     auto-generated by the v4 pipeline)
-│
-└── visualizations/                 ← notebooks + auto-generated reference PNGs
-    ├── visualizations_cae_correction.ipynb       ← cAE quality (writes TRAIN_*.png etc.)
-    ├── visualizations_SOTA_analytics.ipynb       ← SOTA suite (~30 plots, all **inline**)
-    ├── plot_counts_vs_tpm.py / counts_vs_tpm_manifold.png   ← TPM vs Counts UMAP + KDE
-    ├── plot_pca_kills_signal.py / pca_signal_destruction.png ← PCA truncation vs response
-    ├── batch_correction_metrics.png              ← from run_cae_correction
-    ├── per_cohort_silhouette.png                 ← from run_cae_correction
-    ├── TRAIN_*.png                               ← from visualizations_cae_correction.ipynb
-    └── v4_*.png                                  ← from v4_definitive_pipeline
-
-Legacy `sota_*.pdf` exports have been removed from git; SHAP / ROC / PR for SOTA live only
-in `visualizations_SOTA_analytics.ipynb`. Local `logs_*.txt` files are gitignored — delete
-them anytime to tidy the repo root.
+│       └── v5_strict_pipeline.py       ← primary evaluation entry-point
+├── data/
+│   ├── raw/                            ← *.adata.zarr per cohort
+│   └── processed/                      ← per-cohort + UNIFIED_Cohort.h5ad
+├── metrics_csv/
+│   ├── v5_os_bin35_cv_results.csv
+│   ├── v5_os_bin35_summary.csv
+│   └── v5_os_bin35_ood_per_cohort.csv
+├── visualizations/
+│   ├── plot_v5_metrics.py
+│   └── v5_final_ood_performance.png
+└── scripts/
+    └── export_embeddings_for_merge.py
 ```
 
-### Optional: Supervised fine-tuning of scGPT
-
-GPU strongly recommended. On a modern multi-core CPU a 3-epoch ×
-3-fold run with the **CPU-tuned defaults below** finishes in ~6 hours
-and shifts the survival C-index measurably; a full 5-fold × 20-epoch
-run is still impractical on CPU (~30 hours at the original sequence
-length). The script is end-to-end validated.
-
-```powershell
-# Recommended (GPU available)
-python -m batchcor_rna_emb.modeling.finetune_scgpt_survival `
-    --epochs 20 --unfreeze-last 2 --batch-size 32 --cox-batch 64
-
-# CPU "real" run (3-fold CV, 3 epochs, ~6 hours on a 4-core box)
-$env:NUM_THREADS = '4'
-python -m batchcor_rna_emb.modeling.finetune_scgpt_survival `
-    --epochs 3 --n-splits 3 --batch-size 16 --cox-batch 16 `
-    --n-hvg 600 --warmup-epochs 1 --no-amp
-
-# CPU smoke test (200 patients, ~10 min — sanity only, weak C-index)
-$env:NUM_THREADS = '4'
-python -m batchcor_rna_emb.modeling.finetune_scgpt_survival `
-    --epochs 1 --n-splits 2 --batch-size 16 --cox-batch 16 `
-    --max-train-n 200 --n-hvg 600 --warmup-epochs 0 --no-amp
-```
-
-Writes `embeddings/finetuned_scgpt_embeddings.{npy,npz}` and stamps
-`obsm["scGPT_finetuned_embedding"]` into the existing h5ad files. The
-next `v4_definitive_pipeline` run auto-detects the new key (gracefully
-skipping the SFT branch if the obsm covers <50 % of patients, e.g.
-after a `--max-train-n` smoke run).
-
-Key flags:
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--epochs` | 30 | per-fold epoch budget |
-| `--n-splits` | 5 | stratified K-fold CV |
-| `--batch-size` | 32 | forward microbatch (use 16 on CPU) |
-| `--cox-batch` | 64 | Cox-loss risk-set per gradient step. Set equal to `--batch-size` on CPU; >batch-size means microbatch accumulation and *quadratically* more peak memory. |
-| `--unfreeze-last` | 2 | trainable transformer blocks (12 total) |
-| `--n-hvg` | 0 (=1200) | shared HVG count fed to scGPT. Halving to **600** quarters attention compute and is the single biggest CPU speedup; minor accuracy cost. |
-| `--warmup-epochs` | -1 (auto) | LR warmup epochs; auto-clamps to `min(epochs-1, 2)` for short runs |
-| `--max-train-n` | 0 | if >0, stratified sub-sample of TRAIN — smoke runs only |
-| `--no-amp` | off | disables mixed precision (mandatory on CPU) |
-
-#### Environment notes
-
-* **`scgpt 0.2.4` + `torch >= 2.4`**: the scgpt package imports
-  `torchtext`, whose last release (0.18.0) is built for `torch 2.3`
-  and is unusable on newer torch builds. We ship
-  `batchcor_rna_emb/_torchtext_shim.py`, a pure-Python stand-in that
-  is auto-installed when the real torchtext fails to load.
-* **Windows + MKL threading**: the scGPT encoder forward pass
-  occasionally access-violates under MKL with `>= 8` threads on
-  Windows. The script defaults to `torch.set_num_threads(1)` for
-  safety; **`NUM_THREADS=4` is the empirical sweet-spot** on this
-  machine — about 3× faster than single-thread without crashes.
-* **Cox-loss memory**: setting `--cox-batch > --batch-size`
-  accumulates `K = cox_batch / batch_size` autograd graphs before the
-  backward pass. On CPU each graph copies all activations of the
-  trainable transformer layers; `K = 4` is the empirical OOM
-  threshold on a 16 GB box. Keeping `cox_batch == batch_size` is the
-  safest default.
+Legacy **v4** metrics, plots, and `v4_definitive_pipeline.py` are deprecated; v4 CSVs
+were removed from the repo.
 
 ---
 
-## Methodology in one paragraph
+## Train vs test cohorts
 
-The scGPT transformer encodes each patient's bulk-RNA profile into a
-512-D embedding. A Conditional AutoEncoder (cAE, v3 balanced) is trained
-on those embeddings with a one-hot Cohort code as a conditioning signal
-and projects them into a domain-aligned 512-D space (`cAE_embedding`).
-For OOD evaluation, public cohorts that the cAE has never seen are
-projected with neutral one-hots in both encoder and decoder
-(`cAE_embedding_OOD`). The downstream evaluation fuses the corrected
-embedding with 47 dense numeric clinical features (4 MFP scores + 43
-Kassandra cell-type fractions), one-hot categorical features
-(Diagnosis, Cohort, Therapy_group, MSKCC risk, Stage, Gender) and
-sparse numerics with explicit missing-indicators (Age, TMB, PDL1).
-Six survival models (Cox-strat, Coxnet, RSF, GB-Surv, XGBoost-Cox,
-DeepSurv) and six classifiers (LogReg, RF, XGBoost, LightGBM, MLP,
-stack) are run with 5-fold stratified CV and a global ensemble is
-trained on the entire pool to evaluate out-of-distribution AUC on the
-three public PUB cohorts.
+| Split | Cohorts |
+|-------|---------|
+| **train** | `KIRC_Tissue_ICI_Pred`, `Melanoma_Tissue_ICI_Pred`, `NSCLC_Tissue_ICI_Pred` |
+| **test** | `PUB_BRCA_SCANB`, `PUB_BLCA_*`, `PUB_ccRCC_*` (ICI + TKI) |
+| **excluded** | `PUB_KIRC_ICI_combined` (duplicate of train KIRC) |
+
+---
+
+## Methodology (v5)
+
+scGPT produces 512-D embeddings per patient. Within each CV fold, a cAE conditioned on
+**Diagnosis** removes batch-specific variation; at inference the decoder uses **neutral
+(zero) batch vectors** so corrected embeddings represent shared biology. LightGBM
+predicts `OS_bin_35months` from PCA-reduced embeddings plus scaled clinical features.
+OOD evaluation reuses one global cAE and classifier fit on all labelled train data,
+then applies the same protocol independently to each external cohort.
+
+---
+
+## Sharing embeddings
+
+`data/exports/embeddings_to_merge.zip` contains slim h5ad files (patient metadata +
+`obsm['scGPT_embedding']`) for collaborator merge. See `data/exports/embeddings_to_merge/SHARE.md`.

@@ -1,0 +1,9 @@
+cohort,split,time_col,event_col,time_unit,n0,n1,nn
+KIRC_Tissue_ICI_Pred,train,OS,OS_FLAG,days,124,83,965
+Melanoma_Tissue_ICI_Pred,train,OS,OS_FLAG,days,89,23,137
+NSCLC_Tissue_ICI_Pred,train,OS,OS_FLAG,days,349,69,188
+PUB_BLCA_Mariathasan_EGAS00001002556_ICI,test,,,,0,0,347
+PUB_BRCA_SCANB,test,OS,OS_FLAG,days,167,2745,340
+PUB_ccRCC_Immotion150_and_151_ICI,test,PFS,PFS_FLAG,days,237,0,323
+PUB_ccRCC_Immotion150_and_151_TKI,test,PFS,PFS_FLAG,days,259,0,227
+PUB_KIRC_ICI_combined,test,OS,OS_FLAG,days,124,83,965

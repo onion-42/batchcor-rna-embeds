@@ -1,0 +1,5 @@
+cohort,split,n_total,n_labeled,roc_auc,eval_type,target,embedding_in,cae_conditioning
+PUB_BLCA_Mariathasan_EGAS00001002556_ICI,test,347,0,,ood_per_cohort,OS_bin_35months,cAE_embedding_v5_final,Diagnosis
+PUB_BRCA_SCANB,test,3252,2912,0.5437322077157161,ood_per_cohort,OS_bin_35months,cAE_embedding_v5_final,Diagnosis
+PUB_ccRCC_Immotion150_and_151_ICI,test,560,237,,ood_per_cohort,OS_bin_35months,cAE_embedding_v5_final,Diagnosis
+PUB_ccRCC_Immotion150_and_151_TKI,test,486,259,,ood_per_cohort,OS_bin_35months,cAE_embedding_v5_final,Diagnosis

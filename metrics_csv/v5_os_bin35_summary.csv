@@ -1,0 +1,2 @@
+mean_roc_auc,std_roc_auc,n_folds,n_train_labeled,smoke,seed
+0.6392532057070616,0.024322024757764547,5,737,False,42

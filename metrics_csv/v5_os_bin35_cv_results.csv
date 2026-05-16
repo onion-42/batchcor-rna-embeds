@@ -1,0 +1,6 @@
+fold,n_train,n_val,roc_auc,n_features,pca_dim,model,target,embedding_in,cae_conditioning
+1,589,148,0.6333754740834387,198,128,LightGBM,OS_bin_35months,cAE_embedding_v5_fold,Diagnosis
+2,589,148,0.613400758533502,198,128,LightGBM,OS_bin_35months,cAE_embedding_v5_fold,Diagnosis
+3,590,147,0.6607142857142858,198,128,LightGBM,OS_bin_35months,cAE_embedding_v5_fold,Diagnosis
+4,590,147,0.6204081632653062,198,128,LightGBM,OS_bin_35months,cAE_embedding_v5_fold,Diagnosis
+5,590,147,0.6683673469387754,198,128,LightGBM,OS_bin_35months,cAE_embedding_v5_fold,Diagnosis

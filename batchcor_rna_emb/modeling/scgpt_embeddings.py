@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 # =============================================================================
+# PACKAGE SHIM  — must run before ``import scgpt`` (torchtext native ext)
+# =============================================================================
+import batchcor_rna_emb  # noqa: F401
+
+# =============================================================================
 # THIRD-PARTY  — hard imports; no silent fallbacks
 # =============================================================================
 import anndata as ad
@@ -51,6 +56,12 @@ from loguru import logger
 # That is the correct behaviour; do NOT wrap in try/except.
 from scgpt.model import TransformerModel
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
+
+from batchcor_rna_emb.modeling.cohort_registry import (
+    TEST_COHORT_NAMES,
+    TRAIN_COHORT_NAMES,
+    zarr_path,
+)
 
 # =============================================================================
 # LOGGING
@@ -91,19 +102,11 @@ EMBEDDINGS_DIR = REPO_ROOT / "embeddings"
 EMBEDDINGS_DIR.mkdir(exist_ok=True)
 
 # =============================================================================
-# COHORT PATHS  — edit to match your filesystem layout
+# COHORT PATHS  — single source of truth in cohort_registry.py
 # =============================================================================
-TRAIN_FOLDERS = [
-    REPO_ROOT / "data/raw/KIRC_Tissue_ICI_Pred.adata.zarr",
-    REPO_ROOT / "data/raw/Melanoma_Tissue_ICI_Pred.adata.zarr",
-    REPO_ROOT / "data/raw/NSCLC_Tissue_ICI_Pred.adata.zarr",
-]
-TEST_FOLDERS = [
-    REPO_ROOT / "data/raw/PUB_BLCA_Mariathasan_EGAS00001002556_ICI.adata.zarr",
-    REPO_ROOT / "data/raw/PUB_ccRCC_Immotion150_and_151_ICI.adata.zarr",
-    REPO_ROOT / "data/raw/PUB_ccRCC_Immotion150_and_151_TKI.adata.zarr",
-]
-ALL_FOLDERS = TRAIN_FOLDERS + TEST_FOLDERS
+TRAIN_FOLDERS: list[Path] = [zarr_path(n) for n in TRAIN_COHORT_NAMES]
+TEST_FOLDERS: list[Path] = [zarr_path(n) for n in TEST_COHORT_NAMES]
+ALL_FOLDERS: list[Path] = TRAIN_FOLDERS + TEST_FOLDERS
 
 
 # =============================================================================
@@ -136,7 +139,9 @@ class ScGPTInferenceEngine:
 
         # Ensure special tokens exist (some checkpoints omit them; crash is worse
         # than a loud append + warning).
-        for tok in (PAD_TOKEN, CLS_TOKEN, EOS_TOKEN):
+        # Do not append <eos>: it is unused at inference (CLS pooling) and would
+        # desync ntoken vs checkpoint embedding rows (60697 vs 60698).
+        for tok in (PAD_TOKEN, CLS_TOKEN):
             if tok not in self.vocab:
                 logger.warning(
                     f"Special token {tok!r} missing from vocab — appending. "
@@ -169,6 +174,9 @@ class ScGPTInferenceEngine:
         logger.info(f"Embedding dimension (d_model): {self.embsize}")
 
         # ── Build TransformerModel ────────────────────────────────────────────
+        self.input_emb_style: str = cfg.get("input_emb_style", "continuous")
+        self.n_input_bins: int = int(cfg.get("n_bins", N_BINS))
+
         self.model = TransformerModel(
             ntoken                = len(self.vocab),
             d_model               = self.embsize,
@@ -179,6 +187,8 @@ class ScGPTInferenceEngine:
             dropout               = 0.0,            # disabled at inference time
             pad_token             = PAD_TOKEN,
             pad_value             = PAD_VALUE,
+            input_emb_style       = self.input_emb_style,
+            n_input_bins          = self.n_input_bins,
             do_mvc                = False,
             do_dab                = False,
             use_batch_labels      = False,
@@ -200,7 +210,23 @@ class ScGPTInferenceEngine:
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
 
-        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        model_state = self.model.state_dict()
+        filtered: dict[str, torch.Tensor] = {}
+        skipped: list[str] = []
+        for key, tensor in state.items():
+            if key not in model_state:
+                continue
+            if model_state[key].shape != tensor.shape:
+                skipped.append(f"{key} {tuple(tensor.shape)}->{tuple(model_state[key].shape)}")
+                continue
+            filtered[key] = tensor
+        if skipped:
+            logger.warning(
+                "Skipped {} checkpoint tensors with shape mismatch (first 3): {}",
+                len(skipped),
+                skipped[:3],
+            )
+        missing, unexpected = self.model.load_state_dict(filtered, strict=False)
         if missing:
             logger.warning(
                 f"{len(missing)} missing weight keys (first 5): {missing[:5]}"
@@ -389,6 +415,7 @@ def build_model_inputs(
     gene_ids    : np.ndarray,   # (n_genes,)           int64
     pad_id      : int,
     n_bins      : int = N_BINS,
+    input_emb_style: str = "continuous",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Construct the three tensors consumed by TransformerModel.forward().
@@ -405,21 +432,30 @@ def build_model_inputs(
     n_cells, n_genes = expr_binned.shape
     seq_len          = n_genes + 1
 
-    # Integer bin ids must be long tensors for scGPT's value encoder (nn.Embedding).
     gene_tokens  = torch.full((n_cells, seq_len), pad_id, dtype=torch.long)
-    expr_values  = torch.full((n_cells, seq_len), PAD_VALUE, dtype=torch.long)
     key_pad_mask = torch.zeros((n_cells, seq_len), dtype=torch.bool)
 
     # ``torch.tensor`` avoids environments where ``torch.from_numpy`` fails
     # with "Numpy is not available" on some Windows / minimal torch builds.
     g_tensor = torch.tensor(np.asarray(gene_ids), dtype=torch.long)
-    b_tensor = torch.tensor(np.asarray(expr_binned), dtype=torch.long)
+    if input_emb_style == "category":
+        val_dtype = torch.long
+        b_tensor = torch.tensor(np.asarray(expr_binned), dtype=torch.long)
+        cls_val = n_bins
+        pad_val = PAD_VALUE
+    else:
+        val_dtype = torch.float32
+        b_tensor = torch.tensor(np.asarray(expr_binned), dtype=torch.float32)
+        cls_val = float(n_bins)
+        pad_val = float(PAD_VALUE)
+
+    expr_values = torch.full((n_cells, seq_len), pad_val, dtype=val_dtype)
 
     # Position 0 — CLS
     # The model uses pad_id as the input token for the CLS position and
     # replaces it with its own learned CLS embedding internally.
     gene_tokens [:, 0] = pad_id
-    expr_values [:, 0] = n_bins   # out-of-range sentinel the model recognises
+    expr_values [:, 0] = cls_val   # out-of-range sentinel the model recognises
 
     # Positions 1…L — gene tokens
     gene_tokens [:, 1:] = g_tensor.unsqueeze(0).expand(n_cells, -1)
@@ -597,7 +633,11 @@ def transform_to_scgpt_embeddings(
     # 4 — Build model input tensors
     logger.info("Assembling model input tensors …")
     gene_tokens, expr_values, key_pad_mask = build_model_inputs(
-        expr_binned, gene_ids, pad_id=engine.pad_id, n_bins=N_BINS
+        expr_binned,
+        gene_ids,
+        pad_id=engine.pad_id,
+        n_bins=engine.n_input_bins,
+        input_emb_style=engine.input_emb_style,
     )
 
     # 5 — Batched forward pass
@@ -711,14 +751,16 @@ def process_single_folder(
 def process_all_folders(
     batch_size : int = BATCH_SIZE,
     pooling    : str = "cls",
+    folders    : list[Path] | None = None,
 ) -> None:
     """
     Orchestrator:
       1. Verify model weights exist locally.
       2. Load GPU + model once.
-      3. Process all 6 cohorts sequentially.
+      3. Process cohorts sequentially (default: all in cohort_registry).
       4. Crash immediately on any error — no per-cohort recovery.
     """
+    cohorts = folders if folders is not None else ALL_FOLDERS
     # ── Step 0: verify model weights are in place ────────────────────────────
     weight_path = SCGPT_MODEL_DIR / "best_model.pt"
     if not weight_path.exists():
@@ -748,8 +790,13 @@ def process_all_folders(
     engine = ScGPTInferenceEngine(model_dir=SCGPT_MODEL_DIR, device=device)
 
     # ── Iterate cohorts — no try/except; first failure stops everything ───────
-    for i, folder in enumerate(ALL_FOLDERS, start=1):
-        logger.info(f"Cohort {i}/{len(ALL_FOLDERS)}: {folder.name}")
+    for i, folder in enumerate(cohorts, start=1):
+        if not folder.exists():
+            raise FileNotFoundError(
+                f"Cohort zarr missing: {folder}\n"
+                "Copy the curator drop into data/raw/ before running scGPT."
+            )
+        logger.info(f"Cohort {i}/{len(cohorts)}: {folder.name}")
         process_single_folder(
             folder, engine,
             batch_size = batch_size,
@@ -757,13 +804,53 @@ def process_all_folders(
         )
 
     logger.info(
-        f"\nAll {len(ALL_FOLDERS)} cohorts complete.\n"
+        f"\nAll {len(cohorts)} cohorts complete.\n"
         f"Embeddings saved to: {EMBEDDINGS_DIR.resolve()}"
     )
 
 
 if __name__ == "__main__":
+    import argparse
+
+    _parser = argparse.ArgumentParser(description="Extract scGPT embeddings per cohort")
+    _parser.add_argument(
+        "--cohort",
+        action="append",
+        default=None,
+        help="Process only these raw zarr names (e.g. PUB_BRCA_SCANB.adata.zarr)",
+    )
+    _parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Process TRAIN_FOLDERS only",
+    )
+    _parser.add_argument(
+        "--test-only",
+        action="store_true",
+        help="Process TEST_FOLDERS only (includes new PUB_BRCA_SCANB + PUB_KIRC_ICI_combined)",
+    )
+    _args = _parser.parse_args()
+
+    if _args.cohort:
+        def _resolve_cohort_cli(arg: str) -> Path:
+            p = Path(arg)
+            if p.is_absolute():
+                return p
+            name = arg.removesuffix(".zarr")
+            if not name.endswith(".adata"):
+                name = f"{name}.adata"
+            return REPO_ROOT / "data" / "raw" / f"{name}.zarr"
+
+        _folders = [_resolve_cohort_cli(p) for p in _args.cohort]
+    elif _args.train_only:
+        _folders = TRAIN_FOLDERS
+    elif _args.test_only:
+        _folders = TEST_FOLDERS
+    else:
+        _folders = None
+
     process_all_folders(
         batch_size = BATCH_SIZE,
-        pooling    = "cls",    # swap to "mean" for gene-level mean pooling
+        pooling    = "cls",
+        folders    = _folders,
     )
