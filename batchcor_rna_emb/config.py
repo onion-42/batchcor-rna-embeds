@@ -62,6 +62,7 @@ COHORT_CANCER_CODE: dict[str, str] = {
     "PUB_BLCA_Mariathasan_EGAS00001002556": "BLCA",
     "PUB_ccRCC_Immotion150_and_151_ICI": "KIRC",
     "PUB_ccRCC_Immotion150_and_151_TKI": "KIRC",
+    "PUB_BRCA_SCANB": "BRCA",
 }
 
 # Keys written by correction modules into .obsm
