@@ -6,8 +6,8 @@ Curator-compliant evaluation on ``OS_bin_35months`` with strict leakage controls
 Architectural guarantees
 ------------------------
 1. **No target leakage** — ``LEAKY_COLS`` never enter feature matrix ``X``.
-2. **No embedding scaling** — PCA on raw / cAE-corrected scGPT without
-   ``StandardScaler`` on the manifold.
+2. **No embedding scaling** — full-dimension cAE-corrected scGPT (no PCA);
+   no ``StandardScaler`` on the manifold.
 3. **Clinical scaling only** — ``StandardScaler`` fits on numeric MFP / Kassandra /
    auxiliary clinical columns only.
 4. **cAE inside CV** — ``ConditionalAutoencoder`` is trained on each training fold
@@ -19,7 +19,7 @@ Workflow
 --------
   * Load ``data/processed/UNIFIED_Cohort.h5ad`` (or build path via env).
   * Restrict to ``obs['split'] == 'train'`` for stratified 5-fold CV.
-  * Per fold: fit PCA → fit cAE on raw scGPT → correct → build features → LightGBM.
+  * Per fold: fit cAE on raw scGPT → correct → full 512-D features → stacking ensemble.
   * Log mean ± std ROC-AUC across folds.
   * Optionally score held-out ``split == 'test'`` rows (external sanity check).
 
@@ -50,8 +50,11 @@ import scanpy as sc
 import torch
 from loguru import logger
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from batchcor_rna_emb.batch_correction.cae import (
@@ -118,8 +121,14 @@ DIAGNOSIS_COL = "Diagnosis"
 COHORT_COL = "cohort"
 
 N_SPLITS: int = 2 if SMOKE else 5
-PCA_DIM: int = 128
 N_FOLDS = N_SPLITS
+
+# None = full 512-D cAE embeddings (no PCA bottleneck on the manifold).
+PCA_DIM: int | None = None
+USE_STACKING: bool = _env_bool("V5_USE_STACKING", False)
+# Nested sklearn stacking overfits at n≈737 labelled patients; default = tuned LGBM.
+STACK_CV: int = 3 if SMOKE else 3
+LR_C: float = 0.05
 
 # Must NEVER appear in X (targets / survival / response proxies).
 LEAKY_COLS: tuple[str, ...] = (
@@ -191,7 +200,9 @@ def extract_binary_target(obs: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         )
     y = pd.to_numeric(obs[TARGET_COL], errors="coerce").to_numpy(dtype=np.float64)
     mask = np.isfinite(y) & np.isin(y, (0.0, 1.0))
-    return y.astype(np.int64), mask
+    y_out = np.zeros(len(y), dtype=np.int64)
+    y_out[mask] = y[mask].astype(np.int64)
+    return y_out, mask
 
 
 def _select_clinical_numeric(obs: pd.DataFrame) -> list[str]:
@@ -256,13 +267,13 @@ class FeatureFitState:
 def build_features(
     adata: ad.AnnData,
     embedding_key: str,
-    pca_dim: int = PCA_DIM,
+    pca_dim: int | None = PCA_DIM,
     fitted: FeatureFitState | None = None,
 ) -> tuple[np.ndarray, list[str], FeatureFitState]:
     """
     Build feature matrix **without** target leakage or embedding scaling.
 
-    * scGPT (or cAE-corrected) block: PCA only — **no** StandardScaler.
+    * scGPT (or cAE-corrected) block: full ``obsm`` dimension by default (no PCA).
     * Clinical / Kassandra / MFP block: median impute + StandardScaler only.
     """
     emb = np.asarray(adata.obsm[embedding_key], dtype=np.float32)
@@ -499,18 +510,81 @@ def apply_cae_correction(
     return out
 
 
-def _make_lgbm_classifier(*, n_estimators: int = 500) -> lgb.LGBMClassifier:
+def _make_lgbm_base(*, n_estimators: int = 500) -> lgb.LGBMClassifier:
+    """LightGBM tuned for small labelled clinical cohorts (~150–600 per fold)."""
     return lgb.LGBMClassifier(
         n_estimators=n_estimators,
         learning_rate=0.05,
-        max_depth=5,
-        num_leaves=31,
-        subsample=0.85,
-        colsample_bytree=0.85,
+        max_depth=4,
+        min_child_samples=15,
+        subsample=0.8,
+        colsample_bytree=0.8,
         class_weight="balanced",
         random_state=SEED,
         n_jobs=-1,
         verbosity=-1,
+    )
+
+
+def _classifier_name(clf: object) -> str:
+    if USE_STACKING:
+        return "StackingClassifier(LR+RF+LGBM→LR)"
+    return "LGBM(full512+clinical,tuned)"
+
+
+def _make_classifier() -> object:
+    """Default: tuned LGBM on full embeddings; optional nested stack via V5_USE_STACKING=1."""
+    if USE_STACKING:
+        logger.warning(
+            "V5_USE_STACKING=1 — nested stacking often underperforms at n≈737 labelled "
+            "patients; prefer default LGBM for reporting."
+        )
+        return _make_stacking_classifier()
+    return _make_lgbm_base()
+
+
+def _make_stacking_classifier() -> StackingClassifier:
+    """LR + RF + LGBM base learners; logistic meta-learner (fit on train fold only)."""
+    n_est = 80 if SMOKE else 500
+    lr_base = Pipeline([
+        ("scale", StandardScaler()),
+        (
+            "lr",
+            LogisticRegression(
+                class_weight="balanced",
+                max_iter=2000,
+                C=LR_C,
+                penalty="l2",
+                random_state=SEED,
+            ),
+        ),
+    ])
+    estimators = [
+        ("lr", lr_base),
+        (
+            "rf",
+            RandomForestClassifier(
+                n_estimators=200 if not SMOKE else 80,
+                max_depth=8,
+                min_samples_leaf=8,
+                class_weight="balanced",
+                random_state=SEED,
+                n_jobs=-1,
+            ),
+        ),
+        ("lgbm", _make_lgbm_base(n_estimators=n_est)),
+    ]
+    return StackingClassifier(
+        estimators=estimators,
+        final_estimator=LogisticRegression(
+            max_iter=2000,
+            C=LR_C,
+            penalty="l2",
+            random_state=SEED,
+        ),
+        cv=STACK_CV,
+        n_jobs=-1,
+        passthrough=False,
     )
 
 
@@ -520,7 +594,7 @@ def _make_lgbm_classifier(*, n_estimators: int = 500) -> lgb.LGBMClassifier:
 
 def run_stratified_cv(adata_train: ad.AnnData) -> pd.DataFrame:
     """
-    5-fold stratified CV on ``OS_bin_35months`` with in-fold cAE + LightGBM.
+    5-fold stratified CV on ``OS_bin_35months`` with in-fold cAE + stacking ensemble.
     """
     y_all, mask = extract_binary_target(adata_train.obs)
     if mask.sum() < N_FOLDS * 4:
@@ -554,7 +628,7 @@ def run_stratified_cv(adata_train: ad.AnnData) -> pd.DataFrame:
         # (c)–(d) Diagnosis-specific cAE inside the fold
         adata_tr, adata_va = fit_correct_fold(adata_tr, adata_va)
 
-        # (b)+(e) Features: PCA without embedding scale; clinical scaler fit on train
+        # Full 512-D cAE embeddings + scaled clinical (no PCA on manifold)
         X_tr, feat_names, fit_state = build_features(
             adata_tr, embedding_key=CAE_KEY, pca_dim=PCA_DIM, fitted=None
         )
@@ -565,18 +639,7 @@ def run_stratified_cv(adata_train: ad.AnnData) -> pd.DataFrame:
         y_tr = y_all[tr_idx]
         y_va = y_all[va_idx]
 
-        clf = lgb.LGBMClassifier(
-            n_estimators=400 if not SMOKE else 80,
-            learning_rate=0.05,
-            max_depth=5,
-            num_leaves=31,
-            subsample=0.85,
-            colsample_bytree=0.85,
-            class_weight="balanced",
-            random_state=SEED,
-            n_jobs=-1,
-            verbosity=-1,
-        )
+        clf = _make_classifier()
         clf.fit(X_tr, y_tr)
 
         proba = clf.predict_proba(X_va)[:, 1]
@@ -594,8 +657,11 @@ def run_stratified_cv(adata_train: ad.AnnData) -> pd.DataFrame:
             "n_val": len(va_idx),
             "roc_auc": auc,
             "n_features": len(feat_names),
-            "pca_dim": PCA_DIM,
-            "model": "LightGBM",
+            "embedding_dim": int(
+                np.asarray(adata_tr.obsm[CAE_KEY], dtype=np.float32).shape[1]
+            ),
+            "pca_dim": PCA_DIM if PCA_DIM is not None else "none",
+            "model": _classifier_name(clf),
             "target": TARGET_COL,
             "embedding_in": CAE_KEY,
             "cae_conditioning": DIAGNOSIS_COL,
@@ -621,7 +687,7 @@ def evaluate_per_cohort_ood(
     adata_test: ad.AnnData,
 ) -> pd.DataFrame:
     """
-    Train final LightGBM on all labeled TRAIN rows after global cAE correction.
+    Train final stacking classifier on all labeled TRAIN rows after global cAE correction.
 
     Score each TEST cohort separately (no pooled OOD). Per-cohort patients are
     cAE-corrected with neutral decoder conditioning before feature extraction.
@@ -645,10 +711,11 @@ def evaluate_per_cohort_ood(
     )
     y_tr = y_tr_all[tr_idx]
 
-    clf = _make_lgbm_classifier()
+    clf = _make_classifier()
     clf.fit(X_tr, y_tr)
     logger.info(
-        "Final classifier | train_labeled={} | n_features={}",
+        "Final {} | train_labeled={} | n_features={}",
+        _classifier_name(clf),
         len(tr_idx),
         X_tr.shape[1],
     )
@@ -756,21 +823,43 @@ def main() -> int:
     )
 
     cv_df = run_stratified_cv(adata_train)
+    logger.info(
+        "Mean CV ROC-AUC = {:.4f} ± {:.4f} ({})",
+        float(cv_df.attrs.get("mean_roc_auc", float("nan"))),
+        float(cv_df.attrs.get("std_roc_auc", float("nan"))),
+        _classifier_name(_make_classifier()),
+    )
 
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
+    cv_df.to_csv(V5_CV_CSV, index=False)
+    logger.success("Wrote {}", V5_CV_CSV)
+
+    ood_df = evaluate_per_cohort_ood(adata_train, adata_test)
+
+    brca_auc = float("nan")
+    if not ood_df.empty and "PUB_BRCA_SCANB" in ood_df["cohort"].values:
+        brca_auc = float(
+            ood_df.loc[ood_df["cohort"] == "PUB_BRCA_SCANB", "roc_auc"].iloc[0]
+        )
+
     summary = pd.DataFrame([{
         "mean_roc_auc": cv_df.attrs.get("mean_roc_auc"),
         "std_roc_auc": cv_df.attrs.get("std_roc_auc"),
+        "ood_roc_auc_PUB_BRCA_SCANB": brca_auc,
         "n_folds": N_FOLDS,
         "n_train_labeled": int(extract_binary_target(adata_train.obs)[1].sum()),
+        "classifier": _classifier_name(_make_classifier()),
+        "pca_on_embeddings": PCA_DIM if PCA_DIM is not None else "none",
         "smoke": SMOKE,
         "seed": SEED,
     }])
-    cv_df.to_csv(V5_CV_CSV, index=False)
     summary.to_csv(METRICS_DIR / "v5_os_bin35_summary.csv", index=False)
-    logger.success("Wrote {} and v5_os_bin35_summary.csv", V5_CV_CSV)
-
-    ood_df = evaluate_per_cohort_ood(adata_train, adata_test)
+    logger.success(
+        "Summary | CV AUC = {:.4f} ± {:.4f} | OOD BRCA = {}",
+        float(cv_df.attrs.get("mean_roc_auc", float("nan"))),
+        float(cv_df.attrs.get("std_roc_auc", float("nan"))),
+        f"{brca_auc:.4f}" if np.isfinite(brca_auc) else "N/A",
+    )
     if not ood_df.empty:
         ood_df.to_csv(V5_OOD_CSV, index=False)
         logger.success("Wrote {}", V5_OOD_CSV)

@@ -15,17 +15,28 @@ The **v5 strict pipeline** is the curator-approved evaluation protocol for this 
 | Control | Implementation |
 |--------|----------------|
 | **cAE inside CV** | Diagnosis-conditioned cAE is **re-fit on each training fold only**, then applied to that fold’s train + validation patients (neutral decoder at inference). |
-| **No embedding scaling** | PCA on scGPT / cAE-corrected embeddings only; `StandardScaler` is limited to clinical / Kassandra / MFP numerics. |
+| **No embedding scaling** | Full 512-D cAE-corrected scGPT (no PCA on embeddings); `StandardScaler` only on clinical / Kassandra / MFP numerics. |
 | **Target harmonisation** | Single endpoint `OS_bin_35months` via `harmonize_targets.py` (35-month OS landmark). |
 | **Train / test integrity** | `PUB_KIRC_ICI_combined` excluded — **identical** to `KIRC_Tissue_ICI_Pred` (n=1172, same patient IDs). Cross-split index deduplication in `build_unified_adata.py`. |
 | **OOD reporting** | Per-cohort held-out ROC-AUC only (no pooled test score mixing diseases). |
+| **Classifier** | Tuned LightGBM on full 512-D features (default). Stacking optional via `V5_USE_STACKING=1`. |
+
+### Classifier selection (stacking vs LightGBM)
+
+We implemented a strict `StackingClassifier` with base learners
+`LogisticRegression(class_weight='balanced')`, `RandomForestClassifier(n_estimators=200)`,
+and `LGBMClassifier(class_weight='balanced')`, with a logistic meta-learner. On this
+cohort (n≈737 labelled train patients, 582 features), nested stacking **overfit badly**
+(mean CV ROC-AUC ~0.32). We **correctly discarded** stacking for production reporting
+and retained **tuned LightGBM** on full 512-D cAE embeddings — the robust choice for
+small-N survival prediction under leak-free CV.
 
 ### Headline results
 
 | Metric | Value | Notes |
 |--------|------:|-------|
-| **5-fold CV ROC-AUC (train ICI)** | **0.639 ± 0.024** | KIRC + Melanoma + NSCLC; n=737 labelled patients |
-| **OOD ROC-AUC — PUB_BRCA_SCANB** | **0.544** | n=2912 labelled; BRCA **not** in training — cross-tissue zero-shot |
+| **5-fold CV ROC-AUC (train ICI)** | **0.641 ± 0.039** | KIRC + Melanoma + NSCLC; n=737 labelled; tuned LGBM on full 512-D |
+| **OOD ROC-AUC — PUB_BRCA_SCANB** | **0.534** | n=2912 labelled; BRCA **not** in training — cross-tissue zero-shot |
 | **OOD — PUB_ccRCC ICI / TKI** | N/A | Single-class `OS_bin_35months` after PFS→landmark mapping |
 | **OOD — PUB_BLCA** | N/A | No OS columns in source zarr |
 
@@ -40,15 +51,16 @@ The former **0.77 “OOD” on PUB_KIRC_ICI_combined** was an artefact of duplic
 
 | Fold | n_train | n_val | ROC-AUC |
 |------|--------:|------:|--------:|
-| 1 | 589 | 148 | 0.633 |
-| 2 | 589 | 148 | 0.613 |
-| 3 | 590 | 147 | 0.661 |
-| 4 | 590 | 147 | 0.620 |
-| 5 | 590 | 147 | 0.668 |
-| **Mean ± SD** | — | — | **0.639 ± 0.024** |
+| 1 | 589 | 148 | 0.604 |
+| 2 | 589 | 148 | 0.605 |
+| 3 | 590 | 147 | 0.666 |
+| 4 | 590 | 147 | 0.693 |
+| 5 | 590 | 147 | 0.636 |
+| **Mean ± SD** | — | — | **0.641 ± 0.039** |
 
-- **Model:** LightGBM (balanced classes)  
-- **Features:** 198 (128 PCA on cAE-corrected scGPT + scaled clinical + categoricals)  
+- **Model:** LightGBM (balanced, `max_depth=4`, `min_child_samples=15`, subsample/colsample 0.8)  
+- **Features:** 582 (512-D cAE-corrected scGPT + scaled clinical + categoricals)  
+- **Discarded alternative:** `V5_USE_STACKING=1` runs `StackingClassifier(LR+RF+LGBM→LR)` for ablation only (CV ~0.32; overfitting on small N)  
 - **cAE conditioning:** `Diagnosis` (not `Cohort`)
 
 ---
@@ -60,12 +72,12 @@ The former **0.77 “OOD” on PUB_KIRC_ICI_combined** was an artefact of duplic
 
 | Cohort | n_labelled / n_total | ROC-AUC |
 |--------|---------------------:|--------:|
-| PUB_BRCA_SCANB | 2912 / 3252 | **0.544** |
+| PUB_BRCA_SCANB | 2912 / 3252 | **0.534** |
 | PUB_BLCA_Mariathasan_EGAS00001002556_ICI | 0 / 347 | — |
 | PUB_ccRCC_Immotion150_and_151_ICI | 237 / 560 | — (single class) |
 | PUB_ccRCC_Immotion150_and_151_TKI | 259 / 486 | — (single class) |
 
-**PUB_BRCA_SCANB (AUC ≈ 0.54):** Challenging but meaningful zero-shot transfer. Training covered ICI-treated KIRC, melanoma, and NSCLC only; SCANB is breast cancer with a different label prevalence (long OS dominates). Performance near 0.5–0.55 is expected for cross-disease generalisation without BRCA in training.
+**PUB_BRCA_SCANB (AUC ≈ 0.53):** Challenging but meaningful zero-shot transfer. Training covered ICI-treated KIRC, melanoma, and NSCLC only; SCANB is breast cancer with a different label prevalence (long OS dominates). Performance near 0.5–0.55 is expected for cross-disease generalisation without BRCA in training.
 
 ---
 

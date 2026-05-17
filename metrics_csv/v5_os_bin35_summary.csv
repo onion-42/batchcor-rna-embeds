@@ -1,2 +1,2 @@
-mean_roc_auc,std_roc_auc,n_folds,n_train_labeled,smoke,seed
-0.6392532057070616,0.024322024757764547,5,737,False,42
+mean_roc_auc,std_roc_auc,ood_roc_auc_PUB_BRCA_SCANB,n_folds,n_train_labeled,classifier,pca_on_embeddings,smoke,seed
+0.6410542712660285,0.038732143231884376,0.5342146308475945,5,737,"LGBM(full512+clinical,tuned)",none,False,42

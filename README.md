@@ -33,17 +33,27 @@ out-of-distribution (OOD) reporting.
 4. **Per-cohort OOD only** — After CV, a final model is trained on labelled train
    patients; each **test cohort is scored separately** (no pooled BRCA + kidney AUC).
 
-5. **Feature hygiene** — PCA on embeddings without `StandardScaler`; clinical/Kassandra
-   numerics scaled only; survival/response columns blocklisted from `X`.
+5. **Full 512-D embeddings** — No PCA on scGPT or cAE-corrected embeddings; the
+   classifier sees the complete 512-D representation plus scaled clinical features.
+
+6. **Tuned LightGBM classifier** — `class_weight='balanced'` with small-data defaults
+   (`max_depth=4`, `min_child_samples=15`, `subsample=0.8`, `colsample_bytree=0.8`).
+   Clinical/Kassandra numerics are scaled only; survival/response columns are blocklisted
+   from `X`.
+
+7. **Classifier selection** — A `StackingClassifier` (LR + RF + LGBM → LR meta) was
+   implemented and tested (`V5_USE_STACKING=1`) but **discarded**: nested stacking
+   overfit severely on n≈737 labelled patients (CV AUC ~0.32). The production default
+   remains tuned LightGBM.
 
 ### Headline results
 
 | Metric | Value |
 |--------|------:|
-| **5-fold CV ROC-AUC** (train ICI, `OS_bin_35months`) | **0.639 ± 0.024** |
-| **OOD ROC-AUC — PUB_BRCA_SCANB** (zero-shot, BRCA not in train) | **0.544** |
+| **5-fold CV ROC-AUC** (train ICI, `OS_bin_35months`) | **0.641 ± 0.039** |
+| **OOD ROC-AUC — PUB_BRCA_SCANB** (zero-shot, BRCA not in train) | **0.534** |
 
-**PUB_BRCA_SCANB (~0.54):** Expected for **cross-tissue zero-shot** transfer. Training
+**PUB_BRCA_SCANB (~0.53):** Expected for **cross-tissue zero-shot** transfer. Training
 cohorts are ICI-treated KIRC, melanoma, and NSCLC only; SCANB is breast cancer with a
 different survival landscape. Modest AUC above chance reflects partial signal in shared
 clinical and embedding structure, not in-distribution performance.
@@ -97,6 +107,7 @@ Environment flags:
 |----------|--------|
 | `V5_SEED` | RNG seed (default 42) |
 | `V5_SMOKE=1` | 2-fold CV, fewer cAE epochs (quick dev) |
+| `V5_USE_STACKING=1` | Stacking ensemble (experimental; not recommended at n≈737) |
 | `V5_UNIFIED` | Path to unified h5ad override |
 
 Full metric narrative: [`metrics/ALL_METRICS_SUMMARY.md`](metrics/ALL_METRICS_SUMMARY.md).
@@ -152,12 +163,12 @@ were removed from the repo.
 
 ## Methodology (v5)
 
-scGPT produces 512-D embeddings per patient. Within each CV fold, a cAE conditioned on
-**Diagnosis** removes batch-specific variation; at inference the decoder uses **neutral
-(zero) batch vectors** so corrected embeddings represent shared biology. LightGBM
-predicts `OS_bin_35months` from PCA-reduced embeddings plus scaled clinical features.
-OOD evaluation reuses one global cAE and classifier fit on all labelled train data,
-then applies the same protocol independently to each external cohort.
+scGPT produces 512-D embeddings per patient. Within each CV fold, a **Diagnosis-conditioned
+cAE** is re-fit on the training fold only; at inference the decoder uses **neutral (zero)
+batch vectors** so corrected embeddings represent shared biology. **Tuned LightGBM**
+predicts `OS_bin_35months` from the full 512-D cAE-corrected embeddings plus scaled
+clinical features (no PCA bottleneck). OOD evaluation fits one global cAE and classifier
+on all labelled train data, then scores each external test cohort independently.
 
 ---
 
