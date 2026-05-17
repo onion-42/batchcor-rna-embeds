@@ -52,13 +52,14 @@ dependencies = [
     "lightautoml>=0.3",
     "optuna>=3.0",
     "kneed>=0.8",
-    # --- survival ---
     "lifelines>=0.27",
     # --- logging & viz ---
     "loguru>=0.7",
     "seaborn>=0.12",
     "tqdm>=4.0",
-    "mygene>=3.2.2"
+    "mygene>=3.2.2",
+    # --- utilities ---
+    "iterative-stratification>=0.1.9",
 ]
 requires-python = ">=3.11"
 

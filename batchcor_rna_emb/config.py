@@ -21,8 +21,26 @@ MODELS_DIR: Path = PROJECT_ROOT / "models"
 # --- AnnData keys ---
 BATCH_COL: str = "RNA_batch"
 DIAGNOSIS_COL: str = "Diagnosis"
+COHORT_COL: str = "Cohort"
 SPLIT_PREFIX: str = "Split_"
 TARGET_PREFIX: str = "Target_"
+
+# Survival columns mapping
+SURVIVAL_COLS: dict[str, str] = {
+    "os_time": "OS.time",
+    "os_event": "OS",
+    "pfs_time": "PFS.time",
+    "pfs_event": "PFS",
+}
+
+# Features that should never be used as inputs during model training
+LEAKY_COLS: list[str] = [
+    "OS", "OS.time", "OS_FLAG",
+    "PFS", "PFS.time", "PFS_FLAG",
+    "Response", "Recist",
+    "Target_Response", "Target_DCR",
+    "Split_Response", "Split_DCR"
+]
 
 # Embedding keys in .obsm (FM = Foundation Model)
 EMBEDDING_KEY_PATTERN: str = "FM_{model}_embeddings"
