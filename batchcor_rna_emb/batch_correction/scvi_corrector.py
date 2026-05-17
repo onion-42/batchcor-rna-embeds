@@ -23,7 +23,7 @@ The decoder receives a one-hot batch vector → can reconstruct batch-specific p
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import torch
@@ -1416,3 +1416,366 @@ class CVAEAdv2Corrector:
             history.recon[-1], history.disc_accuracy[-1], cfg.loss_type,
         )
         return history
+
+
+# ===========================================================================
+# Per-diagnosis batch correction orchestrator
+# ===========================================================================
+
+def correct_per_diagnosis(
+    adata: "anndata.AnnData",
+    embedding_key: str,
+    batch_col: str,
+    diagnosis_col: str,
+    config: CVAEConfig | CVAEAdv2Config,
+    train_mask: np.ndarray,
+    output_key: str,
+    min_train_samples: int = 30,
+) -> dict[str, dict]:
+    """Run cVAE batch correction independently for each diagnosis group.
+
+    For diagnoses with a single batch no batch effect exists, so the
+    model is trained as a plain autoencoder (dimensionality reduction
+    only).  For diagnoses with >1 batches the cVAE learns to remove
+    batch information from the latent space.
+
+    The function **enforces** ``normalize=False`` on the config to
+    protect non-linear COMPASS embeddings from z-score damage.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData with ``.obsm[embedding_key]`` and
+        ``.obs[batch_col]`` / ``.obs[diagnosis_col]``.
+        Modified in-place: ``adata.obsm[output_key]`` is written.
+    embedding_key : str
+        Key in ``.obsm`` pointing to the raw (uncorrected) embeddings.
+    batch_col : str
+        Column in ``.obs`` with batch labels (e.g. ``RNA_batch``).
+    diagnosis_col : str
+        Column in ``.obs`` with diagnosis labels (e.g. ``Diagnosis``).
+    config : CVAEConfig | CVAEAdv2Config
+        Training configuration.  ``normalize`` will be forced to False.
+    train_mask : np.ndarray
+        Boolean array of shape ``(n_obs,)`` — True for training rows.
+    output_key : str
+        Key under which corrected embeddings are stored in ``.obsm``.
+    min_train_samples : int
+        Minimum number of training samples per diagnosis to run cVAE.
+        Below this threshold the diagnosis is trained as autoencoder
+        regardless of batch count.
+
+    Returns
+    -------
+    dict[str, dict]
+        Per-diagnosis diagnostics::
+
+            {"KIRC": {"n_samples": 1172, "n_batches": 5,
+                      "n_train": 936, "corrected": True}, ...}
+
+    Raises
+    ------
+    KeyError
+        If ``embedding_key``, ``batch_col`` or ``diagnosis_col``
+        are missing from ``adata``.
+    """
+    import anndata  # noqa: F811 – local import to keep module lightweight
+
+    # --- Validate inputs ---
+    if embedding_key not in adata.obsm:
+        raise KeyError(f"obsm key '{embedding_key}' not found")
+    if batch_col not in adata.obs.columns:
+        raise KeyError(f"obs column '{batch_col}' not found")
+    if diagnosis_col not in adata.obs.columns:
+        raise KeyError(f"obs column '{diagnosis_col}' not found")
+
+    # --- Enforce normalize=False (protect non-linear embeddings) ---
+    if getattr(config, "normalize", False):
+        logger.warning(
+            "config.normalize=True overridden to False — "
+            "linear scaling damages non-linear COMPASS embeddings"
+        )
+        config = replace(config, normalize=False)
+
+    latent_dim = config.latent_dim
+    emb_all = np.asarray(adata.obsm[embedding_key], dtype=np.float32)
+    output = np.zeros((adata.n_obs, latent_dim), dtype=np.float32)
+
+    diagnoses = adata.obs[diagnosis_col].astype(str).values
+    batch_labels_all = adata.obs[batch_col].astype(str).values
+    unique_diag = sorted(set(diagnoses))
+
+    logger.info(
+        "correct_per_diagnosis: {} diagnoses, embedding='{}' ({}d) → "
+        "latent_dim={}, output='{}'",
+        len(unique_diag), embedding_key, emb_all.shape[1],
+        latent_dim, output_key,
+    )
+
+    diag_results: dict[str, dict] = {}
+
+    for diag in unique_diag:
+        diag_mask = diagnoses == diag
+        diag_idx = np.where(diag_mask)[0]
+
+        emb_diag = emb_all[diag_mask]
+        batch_diag = batch_labels_all[diag_mask]
+        train_mask_diag = train_mask[diag_mask]
+
+        n_samples = int(diag_mask.sum())
+        n_train = int(train_mask_diag.sum())
+        unique_batches = sorted(set(batch_diag))
+        n_batches = len(unique_batches)
+
+        # Batches present in training subset only
+        train_batches = sorted(set(batch_diag[train_mask_diag]))
+        n_train_batches = len(train_batches)
+
+        logger.info(
+            "  Diagnosis '{}': {} samples ({} train), {} total batches, "
+            "{} train batches",
+            diag, n_samples, n_train, n_batches, n_train_batches,
+        )
+
+        # --- Decide correction strategy ---
+        do_batch_correction = (
+            n_batches > 1
+            and n_train_batches > 1
+            and n_train >= min_train_samples
+        )
+
+        if not do_batch_correction:
+            reason = (
+                "single batch" if n_batches <= 1
+                else "single batch in train" if n_train_batches <= 1
+                else f"too few train samples ({n_train} < {min_train_samples})"
+            )
+            logger.info(
+                "    → no batch correction ({}). "
+                "Training as autoencoder for dim-reduction only.",
+                reason,
+            )
+
+        # --- Instantiate corrector based on config type ---
+        corrector = _make_corrector(config)
+
+        # Fit on training subset
+        corrector.fit(
+            X=emb_diag[train_mask_diag],
+            batch_labels=batch_diag[train_mask_diag],
+        )
+
+        # Transform ALL samples of this diagnosis
+        latent = corrector.transform(emb_diag)
+        output[diag_idx] = latent
+
+        diag_results[diag] = {
+            "n_samples": n_samples,
+            "n_train": n_train,
+            "n_batches": n_batches,
+            "n_train_batches": n_train_batches,
+            "corrected": do_batch_correction,
+            "latent_dim": latent_dim,
+        }
+
+        logger.info(
+            "    → stored latent ({}, {}) for '{}' "
+            "[batch_correction={}]",
+            latent.shape[0], latent.shape[1], diag, do_batch_correction,
+        )
+
+        # Free GPU memory
+        del corrector
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    adata.obsm[output_key] = output
+    logger.info(
+        "correct_per_diagnosis complete. Written '{}' shape={}",
+        output_key, output.shape,
+    )
+    return diag_results
+
+
+def _make_corrector(
+    config: CVAEConfig | CVAEAdv2Config,
+) -> CVAECorrector | CVAEAdv2Corrector:
+    """Instantiate the right corrector class from the config type.
+
+    Parameters
+    ----------
+    config : CVAEConfig | CVAEAdv2Config
+        Training configuration.
+
+    Returns
+    -------
+    CVAECorrector | CVAEAdv2Corrector
+        Corrector instance.
+
+    Raises
+    ------
+    TypeError
+        If config type is not recognized.
+    """
+    if isinstance(config, CVAEAdv2Config):
+        return CVAEAdv2Corrector(config=config)
+    if isinstance(config, CVAEConfig):
+        return CVAECorrector(config=config)
+    raise TypeError(
+        f"Unsupported config type: {type(config).__name__}. "
+        f"Expected CVAEConfig or CVAEAdv2Config."
+    )
+
+
+# ===========================================================================
+# Over-correction validation utilities
+# ===========================================================================
+
+def validate_overcorrection(
+    adata: "anndata.AnnData",
+    raw_embedding_key: str,
+    corrected_embedding_key: str,
+    batch_col: str,
+    control_col: str | None = None,
+    n_permutations: int = 5,
+    seed: int = 42,
+) -> dict[str, float | list[float]]:
+    """Check whether cVAE correction creates spurious batch structure.
+
+    Two validation modes (auto-selected):
+
+    1. **Cohort control** (when ``control_col`` is provided):
+       Compute silhouette by ``control_col`` before and after correction.
+       Delta should be ≈0 (e.g. Immotion ICI vs TKI — same lab,
+       different trials — no real batch effect between them).
+
+    2. **Permutation test** (when ``control_col`` is None):
+       Assign random fake batch labels drawn from existing ``batch_col``
+       distribution, run cVAE correction, compute silhouette by fake
+       labels.  Repeat ``n_permutations`` times.  All deltas should
+       be ≈0 (e.g. Mariathasan — single batch, no real effect).
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData with both raw and corrected embeddings in ``.obsm``.
+    raw_embedding_key : str
+        Key for uncorrected embeddings in ``.obsm``.
+    corrected_embedding_key : str
+        Key for cVAE-corrected embeddings in ``.obsm``.
+    batch_col : str
+        Column in ``.obs`` with batch labels.
+    control_col : str or None
+        Column for cohort-level control (e.g. ``"Cohort"``).
+        If None, permutation mode is used.
+    n_permutations : int
+        Number of permutations for permutation mode.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    dict[str, float | list[float]]
+        Validation results::
+
+            # Cohort control mode:
+            {"mode": "cohort_control",
+             "sil_raw": 0.058,  "sil_corrected": 0.060,
+             "delta": 0.002,    "control_col": "Cohort"}
+
+            # Permutation mode:
+            {"mode": "permutation",
+             "sil_deltas": [0.001, -0.003, ...],
+             "mean_delta": 0.001,
+             "n_permutations": 5}
+    """
+    from sklearn.metrics import silhouette_score
+
+    emb_raw = np.asarray(adata.obsm[raw_embedding_key], dtype=np.float32)
+    emb_corr = np.asarray(adata.obsm[corrected_embedding_key], dtype=np.float32)
+
+    # --- Mode 1: Cohort control (e.g. Immotion ICI vs TKI) ---
+    if control_col is not None:
+        if control_col not in adata.obs.columns:
+            raise KeyError(f"Control column '{control_col}' not in adata.obs")
+
+        labels = adata.obs[control_col].astype(str).values
+        n_groups = len(set(labels))
+
+        if n_groups < 2:
+            logger.warning(
+                "Control column '{}' has {} group(s), cannot compute "
+                "silhouette. Skipping.",
+                control_col, n_groups,
+            )
+            return {"mode": "cohort_control", "error": "too_few_groups"}
+
+        sil_raw = float(silhouette_score(emb_raw, labels))
+        sil_corr = float(silhouette_score(emb_corr, labels))
+        delta = sil_corr - sil_raw
+
+        logger.info(
+            "Over-correction control (cohort '{}'):\n"
+            "  Sil_raw={:.4f}  Sil_corrected={:.4f}  Δ={:.4f}\n"
+            "  Δ≈0 means no artificial separation created ✓",
+            control_col, sil_raw, sil_corr, delta,
+        )
+        return {
+            "mode": "cohort_control",
+            "control_col": control_col,
+            "sil_raw": round(sil_raw, 4),
+            "sil_corrected": round(sil_corr, 4),
+            "delta": round(delta, 4),
+        }
+
+    # --- Mode 2: Permutation test (e.g. Mariathasan, single-batch) ---
+    rng = np.random.RandomState(seed)
+    real_batches = adata.obs[batch_col].astype(str).values
+    unique_real = sorted(set(real_batches))
+
+    # Draw fake labels from distribution of real batch labels
+    batch_probs = np.array(
+        [np.mean(real_batches == b) for b in unique_real],
+        dtype=np.float64,
+    )
+    # If single-batch, use a synthetic 3-class distribution
+    if len(unique_real) <= 1:
+        fake_classes = ["perm_A", "perm_B", "perm_C"]
+        batch_probs = np.array([0.4, 0.35, 0.25])
+    else:
+        fake_classes = unique_real
+
+    sil_deltas: list[float] = []
+
+    for i in range(n_permutations):
+        fake_labels = rng.choice(
+            fake_classes, size=len(real_batches), p=batch_probs,
+        )
+        # Silhouette on raw embeddings with fake labels
+        sil_raw_perm = float(silhouette_score(emb_raw, fake_labels))
+        # Silhouette on corrected embeddings with fake labels
+        sil_corr_perm = float(silhouette_score(emb_corr, fake_labels))
+        delta_perm = sil_corr_perm - sil_raw_perm
+        sil_deltas.append(round(delta_perm, 4))
+
+        logger.debug(
+            "  Permutation {}/{}: Sil_raw={:.4f}, Sil_corr={:.4f}, "
+            "Δ={:.4f}",
+            i + 1, n_permutations, sil_raw_perm, sil_corr_perm,
+            delta_perm,
+        )
+
+    mean_delta = float(np.mean(sil_deltas))
+    logger.info(
+        "Over-correction permutation test ({} perms):\n"
+        "  Δ per perm: {}\n"
+        "  Mean Δ={:.4f} (should be ≈0, no spurious structure)",
+        n_permutations, sil_deltas, mean_delta,
+    )
+    return {
+        "mode": "permutation",
+        "n_permutations": n_permutations,
+        "sil_deltas": sil_deltas,
+        "mean_delta": round(mean_delta, 4),
+    }
+

@@ -103,9 +103,10 @@ def fit_pca_pipeline(
     X_train: np.ndarray,
     n_components: int,
     seed: int = 42,
-) -> tuple[StandardScaler, PCA]:
+    scale: bool = True,
+) -> tuple[StandardScaler | None, PCA]:
     """
-    Fit StandardScaler + PCA on training data.
+    Fit optional StandardScaler + PCA on training data.
 
     Parameters
     ----------
@@ -115,40 +116,56 @@ def fit_pca_pipeline(
         Number of PCA components (typically from ``detect_pca_knee``).
     seed : int
         Random seed.
+    scale : bool
+        If True, apply StandardScaler before PCA (default, good for
+        gene-expression). Set to False for non-linear embeddings
+        (e.g. COMPASS) where z-score / MAD-scale damages embedding
+        geometry. PCA works fine without scaling when feature
+        distributions are already in a comparable range.
 
     Returns
     -------
-    tuple[StandardScaler, PCA]
-        Fitted scaler and PCA transformer.
+    tuple[StandardScaler | None, PCA]
+        Fitted scaler (None when ``scale=False``) and PCA transformer.
     """
-    scaler = StandardScaler()
+    scaler: StandardScaler | None = None
     pca = PCA(n_components=n_components, random_state=seed)
 
-    X_scaled = scaler.fit_transform(X_train)
-    pca.fit(X_scaled)
+    if scale:
+        scaler = StandardScaler()
+        X_input = scaler.fit_transform(X_train)
+    else:
+        X_input = X_train
+        logger.info(
+            "PCA without scaling (scale=False): preserving embedding geometry"
+        )
+
+    pca.fit(X_input)
 
     total_var = float(np.sum(pca.explained_variance_ratio_) * 100)
     logger.info(
-        "PCA pipeline fitted: {} components, {:.1f}% variance explained",
-        n_components, total_var,
+        "PCA pipeline fitted: {} components, {:.1f}% variance explained, "
+        "scale={}",
+        n_components, total_var, scale,
     )
     return scaler, pca
 
 
 def transform_pca_pipeline(
     X: np.ndarray,
-    scaler: StandardScaler,
+    scaler: StandardScaler | None,
     pca: PCA,
 ) -> np.ndarray:
     """
-    Transform data through a fitted StandardScaler + PCA pipeline.
+    Transform data through a fitted (optional scaler +) PCA pipeline.
 
     Parameters
     ----------
     X : np.ndarray
         Input feature matrix.
-    scaler : StandardScaler
-        Fitted scaler.
+    scaler : StandardScaler or None
+        Fitted scaler. If None, scaling is skipped (used when the
+        pipeline was fitted with ``scale=False``).
     pca : PCA
         Fitted PCA transformer.
 
@@ -157,4 +174,6 @@ def transform_pca_pipeline(
     np.ndarray
         Transformed data of shape ``(n_samples, n_components)``.
     """
-    return pca.transform(scaler.transform(X))
+    if scaler is not None:
+        return pca.transform(scaler.transform(X))
+    return pca.transform(X)
