@@ -381,7 +381,17 @@ def save_adata_zarr(adata: ad.AnnData, path: str | Path) -> None:
     path : str or Path
         Destination path for the Zarr store.
     """
+    import numpy as np
+    
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Sanitize object columns to prevent Zarr string array errors
+    # (e.g., 'expected unicode string, found 3.0')
+    for df in [adata.obs, adata.var]:
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str).replace("nan", np.nan).astype("category")
+                
     adata.write_zarr(path)
     logger.info("Saved AnnData ({} x {}) to '{}'", adata.n_obs, adata.n_vars, path)
