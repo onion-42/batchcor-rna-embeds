@@ -229,8 +229,13 @@ def run_fold(
     y_all = adata.obs[cfg.target_col].values
     batch_all = adata.obs[BATCH_COL].values
 
-    # Filter out samples with missing targets
-    valid = pd.notna(y_all)
+    # Filter out missing targets and enforce STRICTLY BINARY classes
+    valid = pd.notna(y_all) & (y_all.astype(str) != "nan") & (y_all.astype(str) != "Missing")
+    valid_vals = y_all[valid]
+    if len(valid_vals) > 0:
+        top_2_classes = pd.Series(valid_vals).value_counts().nlargest(2).index.values
+        valid = valid & np.isin(y_all, top_2_classes)
+        
     train_valid = train_mask & valid
     test_valid = test_mask & valid
 
@@ -330,7 +335,12 @@ def run_experiment(
         y_all = adata.obs[cfg.target_col].values
         batch_all = adata.obs[BATCH_COL].values
 
-        valid = pd.notna(y_all)
+        valid = pd.notna(y_all) & (y_all.astype(str) != "nan") & (y_all.astype(str) != "Missing")
+        valid_vals = y_all[valid]
+        if len(valid_vals) > 0:
+            top_2_classes = pd.Series(valid_vals).value_counts().nlargest(2).index.values
+            valid = valid & np.isin(y_all, top_2_classes)
+            
         train_valid = train_mask & valid
         test_valid = test_mask & valid
 
