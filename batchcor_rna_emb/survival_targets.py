@@ -83,29 +83,29 @@ def binarize_survival(
     cohort_col: str, 
     medians: dict[str, float]
 ) -> pd.Series:
-    """Binarize survival into 3 classes based on median.
+    """Binarize survival into 2 classes based on per-cohort median.
 
-    0 = Events before median (died/progressed early)
-    1 = Censored before median (unknown outcome)
-    2 = Survived/censored after median (long survivors)
+    0 = Bad prognosis: event occurred before/at median survival time
+    1 = Good prognosis: survived past median (event or censored)
+    NaN = Censored before median (ambiguous, excluded from analysis)
 
     Parameters
     ----------
     df : pd.DataFrame
         Input data.
     time_col : str
-        Time column.
+        Column name for survival time.
     event_col : str
-        Event column.
+        Column name for event indicator (1=event, 0=censored).
     cohort_col : str
-        Cohort column.
+        Column name for cohort grouping.
     medians : dict[str, float]
         Precomputed median times per cohort.
 
     Returns
     -------
     pd.Series
-        Binarized survival labels (categorical: 0, 1, 2) or NaN.
+        Binary survival labels (0 or 1) or NaN for ambiguous cases.
     """
     result = pd.Series(index=df.index, dtype="float64")
     
@@ -119,17 +119,21 @@ def binarize_survival(
         T = df.loc[mask, time_col].astype(float)
         E = df.loc[mask, event_col].astype(float)
         
-        # 0: event before median
-        class_0 = (T <= median_time) & (E == 1)
-        # 1: censored before median
-        class_1 = (T <= median_time) & (E == 0)
-        # 2: survived past median (event or censored)
-        class_2 = (T > median_time)
-        
         cohort_result = pd.Series(np.nan, index=T.index)
-        cohort_result.loc[class_0] = 0.0
-        cohort_result.loc[class_1] = 1.0
-        cohort_result.loc[class_2] = 2.0
+        
+        # 0 = bad: event before/at median
+        cohort_result.loc[(T <= median_time) & (E == 1)] = 0.0
+        # 1 = good: survived past median (event or censored)
+        cohort_result.loc[T > median_time] = 1.0
+        # NaN: censored before median — ambiguous, excluded
+        
+        n_bad = (cohort_result == 0).sum()
+        n_good = (cohort_result == 1).sum()
+        n_excluded = cohort_result.isna().sum()
+        logger.debug(
+            "  Cohort '{}': bad={}, good={}, excluded(censored before median)={}",
+            cohort, n_bad, n_good, n_excluded,
+        )
         
         result.update(cohort_result)
         
