@@ -236,8 +236,12 @@ def run_fold(
 
     X_train = X_all[train_valid]
     X_test = X_all[test_valid]
-    y_train = y_all[train_valid].astype(float)
-    y_test = y_all[test_valid].astype(float)
+    
+    from sklearn.preprocessing import LabelEncoder
+    le = LabelEncoder()
+    le.fit(y_all[valid].astype(str))
+    y_train = le.transform(y_all[train_valid].astype(str)).astype(float)
+    y_test = le.transform(y_all[test_valid].astype(str)).astype(float)
     batch_train = batch_all[train_valid]
     batch_test = batch_all[test_valid]
 
@@ -332,8 +336,12 @@ def run_experiment(
 
         X_train_raw = X_all[train_valid]
         X_test_raw = X_all[test_valid]
-        y_train = y_all[train_valid].astype(float)
-        y_test = y_all[test_valid].astype(float)
+        
+        from sklearn.preprocessing import LabelEncoder
+        le = LabelEncoder()
+        le.fit(y_all[valid].astype(str))
+        y_train = le.transform(y_all[train_valid].astype(str)).astype(float)
+        y_test = le.transform(y_all[test_valid].astype(str)).astype(float)
         batch_train = batch_all[train_valid]
         batch_test = batch_all[test_valid]
 
