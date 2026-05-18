@@ -169,10 +169,16 @@ def add_survival_targets(adata: ad.AnnData) -> None:
     
     # Check if SCANB pre-computed column exists
     if "OS_bin_35months" in obs.columns:
-        logger.info("Found pre-computed 'OS_bin_35months', mapping to Target_OS_bin")
-        # Ensure it's mapped to 0,1,2 properly if needed, assuming it's already 0/1/2
-        adata.obs[f"{TARGET_PREFIX}OS_bin"] = obs["OS_bin_35months"]
-        targets_added.append(f"{TARGET_PREFIX}OS_bin")
+        logger.info("Found pre-computed 'OS_bin_35months' for SCANB, mapping to Target_OS_bin")
+        # Explicit mapping per user request:
+        # 0.0 (Negative) = died before 35 months
+        # 1.0 (Positive) = survived past 35 months OR censored before 35 months
+        # Ensure it is numeric float (0.0 / 1.0) for consistency
+        scanb_bin = pd.to_numeric(obs["OS_bin_35months"], errors='coerce').astype(float)
+        
+        col_name = f"{TARGET_PREFIX}OS_bin"
+        adata.obs[col_name] = pd.Categorical(scanb_bin)
+        targets_added.append(col_name)
     elif os_time in obs.columns and os_event in obs.columns:
         logger.info("Computing per-cohort median for OS")
         os_medians = compute_median_survival_per_cohort(
