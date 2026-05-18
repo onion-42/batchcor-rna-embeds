@@ -12,7 +12,6 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 DATA_DIR: Path = PROJECT_ROOT / "data"
 DATA_RAW_DIR: Path = DATA_DIR / "raw"
 DATA_INTERIM_DIR: Path = DATA_DIR / "interim"
-DATA_INTERIM_PT_DIR: Path = DATA_DIR / "interim_PT"
 DATA_PROCESSED_DIR: Path = DATA_DIR / "processed"
 REPORTS_DIR: Path = PROJECT_ROOT / "reports"
 FIGURES_DIR: Path = REPORTS_DIR / "figures"
@@ -75,6 +74,7 @@ SCVI_LATENT_DIM: int = 128
 # Cancer code mapping for COMPASS (TCGA abbreviations)
 COHORT_CANCER_CODE: dict[str, str] = {
     "PUB_KIRC_ICI_combined": "KIRC",
+    "KIRC_Tissue_ICI_Pred": "KIRC",
     "Melanoma_Tissue_ICI_Pred": "SKCM",
     "NSCLC_Tissue_ICI_Pred": "LUAD",
     "PUB_BLCA_Mariathasan_EGAS00001002556": "BLCA",
