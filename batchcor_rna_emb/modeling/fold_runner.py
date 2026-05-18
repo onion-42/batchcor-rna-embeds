@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from loguru import logger
+from sklearn.dummy import DummyClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import LabelEncoder
 
 from batchcor_rna_emb.config import BATCH_COL, COMPASS_PT_EMBEDDING_KEY, SCVI_LATENT_DIM
 from batchcor_rna_emb.modeling.feature_extraction import fit_pca_pipeline, transform_pca_pipeline
@@ -42,14 +44,24 @@ class FoldConfig:
     """Configuration for a single fold run."""
 
     embedding_key: str = COMPASS_PT_EMBEDDING_KEY
+    embedding_label: str = "COMPASS_PT"  # human-readable name for plots
     target_col: str = "Response"
-    correction_method: str = "none"  # "none" | "cvae_adv2"
+    correction_method: str = "none"  # "none" | "cvae_adv2" | "harmony"
+    correction_label: str = ""  # auto-set if empty
     n_pca: int = 128
     cvae_epochs: int = 100
     cvae_latent_dim: int = SCVI_LATENT_DIM
     seed: int = 42
     # Inner CV for hyperparameter tuning (LogReg, LGBM)
     inner_cv_folds: int = 3
+
+    @property
+    def pipeline_label(self) -> str:
+        """Human-readable pipeline name: 'Embedding + Correction'."""
+        corr = self.correction_label or self.correction_method
+        if corr == "none":
+            return f"{self.embedding_label} (raw)"
+        return f"{self.embedding_label} + {corr}"
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +122,28 @@ def _apply_pca(
     return X_train_pca, X_test_pca
 
 
+def _prepare_targets(y_all, valid_mask, train_mask, test_mask):
+    """Filter to binary classes and encode labels to 0/1."""
+    valid = valid_mask.copy()
+    y_str = y_all.astype(str)
+    valid = valid & (y_str != "nan") & (y_str != "Missing")
+
+    valid_vals = y_all[valid]
+    if len(valid_vals) > 0:
+        top_2 = pd.Series(valid_vals).value_counts().nlargest(2).index.values
+        valid = valid & np.isin(y_all, top_2)
+
+    train_valid = train_mask & valid
+    test_valid = test_mask & valid
+
+    le = LabelEncoder()
+    le.fit(y_all[valid].astype(str))
+    y_train = le.transform(y_all[train_valid].astype(str)).astype(float)
+    y_test = le.transform(y_all[test_valid].astype(str)).astype(float)
+
+    return train_valid, test_valid, y_train, y_test, le
+
+
 def _train_tabpfn(X_train, y_train, X_test, cfg):
     """Train TabPFN (no hyperparameter tuning needed)."""
     from batchcor_rna_emb.modeling.train import train_tabpfn
@@ -117,14 +151,13 @@ def _train_tabpfn(X_train, y_train, X_test, cfg):
     model = train_tabpfn(X_train, y_train, seed=cfg.seed)
     probas_train = predict_proba(model, X_train)
     probas_test = predict_proba(model, X_test)
-    return probas_train, probas_test
+    return probas_train, probas_test, {}
 
 
 def _train_logreg(X_train, y_train, X_test, cfg):
     """Train LogisticRegression with inner CV for hyperparameter tuning."""
     param_grid = {
         "C": [0.001, 0.01, 0.1, 1.0, 10.0],
-        "penalty": ["l2"],
     }
 
     base_model = LogisticRegression(
@@ -149,7 +182,12 @@ def _train_logreg(X_train, y_train, X_test, cfg):
     model = grid.best_estimator_
     probas_train = model.predict_proba(X_train)[:, 1]
     probas_test = model.predict_proba(X_test)[:, 1]
-    return probas_train, probas_test
+
+    cv_info = {
+        "cv_best_roc_auc": grid.best_score_,
+        "cv_best_params": str(grid.best_params_),
+    }
+    return probas_train, probas_test, cv_info
 
 
 def _train_lgbm(X_train, y_train, X_test, cfg):
@@ -185,7 +223,12 @@ def _train_lgbm(X_train, y_train, X_test, cfg):
     model = grid.best_estimator_
     probas_train = model.predict_proba(X_train)[:, 1]
     probas_test = model.predict_proba(X_test)[:, 1]
-    return probas_train, probas_test
+
+    cv_info = {
+        "cv_best_roc_auc": grid.best_score_,
+        "cv_best_params": str(grid.best_params_),
+    }
+    return probas_train, probas_test, cv_info
 
 
 _MODEL_REGISTRY = {
@@ -198,97 +241,6 @@ _MODEL_REGISTRY = {
 # ---------------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------------
-
-def run_fold(
-    adata,
-    split_col: str,
-    cfg: FoldConfig,
-    model_name: str = "tabpfn",
-) -> dict:
-    """Run a single fold: correction → PCA → ML → metrics.
-
-    Parameters
-    ----------
-    adata : ad.AnnData
-        AnnData with raw embeddings, split columns, and targets.
-    split_col : str
-        Column in ``.obs`` with ``"train"``/``"test"`` labels.
-    cfg : FoldConfig
-        Pipeline configuration.
-    model_name : str
-        One of ``"tabpfn"``, ``"logreg"``, ``"lgbm"``.
-
-    Returns
-    -------
-    dict
-        Evaluation metrics for this fold.
-    """
-    train_mask, test_mask = get_split_masks(adata, split_col)
-
-    X_all = adata.obsm[cfg.embedding_key].astype(np.float32)
-    y_all = adata.obs[cfg.target_col].values
-    batch_all = adata.obs[BATCH_COL].values
-
-    # Filter out missing targets and enforce STRICTLY BINARY classes
-    valid = pd.notna(y_all) & (y_all.astype(str) != "nan") & (y_all.astype(str) != "Missing")
-    valid_vals = y_all[valid]
-    if len(valid_vals) > 0:
-        top_2_classes = pd.Series(valid_vals).value_counts().nlargest(2).index.values
-        valid = valid & np.isin(y_all, top_2_classes)
-        
-    train_valid = train_mask & valid
-    test_valid = test_mask & valid
-
-    X_train = X_all[train_valid]
-    X_test = X_all[test_valid]
-    
-    from sklearn.preprocessing import LabelEncoder
-    le = LabelEncoder()
-    le.fit(y_all[valid].astype(str))
-    y_train = le.transform(y_all[train_valid].astype(str)).astype(float)
-    y_test = le.transform(y_all[test_valid].astype(str)).astype(float)
-    batch_train = batch_all[train_valid]
-    batch_test = batch_all[test_valid]
-
-    if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
-        logger.warning(
-            "Fold '{}': <2 classes in train or test (train classes: {}, test classes: {}). Skipping.",
-            split_col, np.unique(y_train), np.unique(y_test),
-        )
-        return {}
-
-    logger.info(
-        "Fold '{}': train={}, test={}, target='{}', correction='{}'",
-        split_col, len(y_train), len(y_test), cfg.target_col, cfg.correction_method,
-    )
-
-    # Step 1: Batch correction (fit on train only)
-    X_train, X_test = _apply_correction(X_train, X_test, batch_train, batch_test, cfg)
-
-    # Step 2: PCA (fit on train only)
-    X_train, X_test = _apply_pca(X_train, X_test, cfg)
-
-    # Step 3: Train ML model
-    train_fn = _MODEL_REGISTRY.get(model_name)
-    if train_fn is None:
-        raise ValueError(f"Unknown model: {model_name}. Choose from {list(_MODEL_REGISTRY.keys())}")
-
-    probas_train, probas_test = train_fn(X_train, y_train, X_test, cfg)
-
-    # Step 4: Evaluate
-    thr, _, _ = youden_threshold(y_train, probas_train)
-    metrics = evaluate_binary_classifier(y_test, probas_test, threshold=thr)
-
-    result = metrics.to_dict()
-    result["split"] = split_col
-    result["model"] = model_name
-    result["correction"] = cfg.correction_method
-    result["target"] = cfg.target_col
-    result["n_train"] = len(y_train)
-    result["n_test"] = len(y_test)
-
-    return result
-
 
 def run_experiment(
     adata,
@@ -306,7 +258,7 @@ def run_experiment(
     cfg : FoldConfig
         Pipeline configuration (shared across folds).
     model_names : list[str] or None
-        Models to evaluate. Defaults to ``["tabpfn", "logreg", "lgbm"]``.
+        Models to evaluate. Defaults to ``["logreg", "lgbm"]``.
     n_splits : int
         Number of splits (seeds 0..n_splits-1).
     split_prefix : str
@@ -315,10 +267,10 @@ def run_experiment(
     Returns
     -------
     pd.DataFrame
-        One row per fold × model with all metrics.
+        One row per fold × model with all metrics + pipeline label.
     """
     if model_names is None:
-        model_names = ["tabpfn", "logreg", "lgbm"]
+        model_names = ["logreg", "lgbm"]
 
     all_results = []
 
@@ -335,23 +287,12 @@ def run_experiment(
         y_all = adata.obs[cfg.target_col].values
         batch_all = adata.obs[BATCH_COL].values
 
-        valid = pd.notna(y_all) & (y_all.astype(str) != "nan") & (y_all.astype(str) != "Missing")
-        valid_vals = y_all[valid]
-        if len(valid_vals) > 0:
-            top_2_classes = pd.Series(valid_vals).value_counts().nlargest(2).index.values
-            valid = valid & np.isin(y_all, top_2_classes)
-            
-        train_valid = train_mask & valid
-        test_valid = test_mask & valid
+        train_valid, test_valid, y_train, y_test, le = _prepare_targets(
+            y_all, pd.notna(y_all), train_mask, test_mask
+        )
 
         X_train_raw = X_all[train_valid]
         X_test_raw = X_all[test_valid]
-        
-        from sklearn.preprocessing import LabelEncoder
-        le = LabelEncoder()
-        le.fit(y_all[valid].astype(str))
-        y_train = le.transform(y_all[train_valid].astype(str)).astype(float)
-        y_test = le.transform(y_all[test_valid].astype(str)).astype(float)
         batch_train = batch_all[train_valid]
         batch_test = batch_all[test_valid]
 
@@ -363,9 +304,9 @@ def run_experiment(
             continue
 
         logger.info(
-            "\n{}\nFold '{}': train={}, test={}, target='{}', correction='{}'\n{}",
+            "\n{}\nFold '{}': train={}, test={}, target='{}', pipeline='{}'\n{}",
             "=" * 60, split_col, len(y_train), len(y_test),
-            cfg.target_col, cfg.correction_method, "=" * 60,
+            cfg.target_col, cfg.pipeline_label, "=" * 60,
         )
 
         # Shared transformation: correction + PCA (fit on train only)
@@ -374,12 +315,20 @@ def run_experiment(
         )
         X_train_feat, X_test_feat = _apply_pca(X_train_feat, X_test_feat, cfg)
 
+        # DummyClassifier baseline (majority class)
+        dummy = DummyClassifier(strategy="most_frequent", random_state=cfg.seed)
+        dummy.fit(X_train_feat, y_train)
+        dummy_probas = dummy.predict_proba(X_test_feat)
+        if dummy_probas.ndim == 2:
+            dummy_probas = dummy_probas[:, 1]
+        dummy_metrics = evaluate_binary_classifier(y_test, dummy_probas, threshold=0.5)
+
         # Run each model on the same transformed features
         for model_name in model_names:
             logger.info("  Training model: {}", model_name)
             try:
                 train_fn = _MODEL_REGISTRY[model_name]
-                probas_train, probas_test = train_fn(
+                probas_train, probas_test, cv_info = train_fn(
                     X_train_feat, y_train, X_test_feat, cfg
                 )
 
@@ -390,9 +339,19 @@ def run_experiment(
                 result["split"] = split_col
                 result["model"] = model_name
                 result["correction"] = cfg.correction_method
+                result["embedding"] = cfg.embedding_label
+                result["pipeline"] = cfg.pipeline_label
                 result["target"] = cfg.target_col
                 result["n_train"] = len(y_train)
                 result["n_test"] = len(y_test)
+
+                # DummyClassifier baselines for each metric
+                for k, v in dummy_metrics.items():
+                    result[f"dummy_{k}"] = v
+
+                # CV info (LogReg/LGBM)
+                result.update(cv_info)
+
                 all_results.append(result)
 
             except Exception as e:
