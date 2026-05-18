@@ -26,10 +26,10 @@ TARGET_PREFIX: str = "Target_"
 
 # Survival columns mapping
 SURVIVAL_COLS: dict[str, str] = {
-    "os_time": "OS.time",
-    "os_event": "OS",
-    "pfs_time": "PFS.time",
-    "pfs_event": "PFS",
+    "os_time": "OS",
+    "os_event": "OS_FLAG",
+    "pfs_time": "PFS",
+    "pfs_event": "PFS_FLAG",
 }
 
 # Features that should never be used as inputs during model training
