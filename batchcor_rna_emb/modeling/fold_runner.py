@@ -296,6 +296,17 @@ def run_experiment(
         batch_train = batch_all[train_valid]
         batch_test = batch_all[test_valid]
 
+        # Handle NaN in embeddings (e.g. Harmony can produce NaN for some samples)
+        n_nan_train = int(np.isnan(X_train_raw).any(axis=1).sum())
+        n_nan_test = int(np.isnan(X_test_raw).any(axis=1).sum())
+        if n_nan_train > 0 or n_nan_test > 0:
+            logger.warning(
+                "NaN in embeddings: train={}/{}, test={}/{}. Imputing with 0.",
+                n_nan_train, len(X_train_raw), n_nan_test, len(X_test_raw),
+            )
+            np.nan_to_num(X_train_raw, copy=False, nan=0.0)
+            np.nan_to_num(X_test_raw, copy=False, nan=0.0)
+
         if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
             logger.warning(
                 "Fold '{}': <2 classes in train or test. Skipping all models.",
