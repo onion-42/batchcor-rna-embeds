@@ -277,7 +277,14 @@ def plot_pipeline_comparison(
                 continue
 
             stars = row.iloc[0]["stars"]
+            p_adj = row.iloc[0]["p_corrected"]
             y_bracket = y_start + idx * bracket_height * 2.5
+
+            # Format label: stars + p_adj value
+            if p_adj < 0.001:
+                bracket_label = f"{stars}\np={p_adj:.1e}"
+            else:
+                bracket_label = f"{stars}\np={p_adj:.3f}"
 
             # Draw bracket
             ax.plot(
@@ -288,12 +295,12 @@ def plot_pipeline_comparison(
             ax.text(
                 (x_pos[idx] + x_pos[idx + 1]) / 2,
                 y_bracket + bracket_height * 1.1,
-                stars, ha="center", va="bottom",
-                fontsize=base_font + 2, fontweight="bold",
+                bracket_label, ha="center", va="bottom",
+                fontsize=base_font - 2, fontweight="bold",
             )
 
         # Adjust y-axis to fit brackets
-        ax.set_ylim(top=y_start + len(order) * bracket_height * 2.5 + bracket_height * 2)
+        ax.set_ylim(top=y_start + len(order) * bracket_height * 3.0 + bracket_height * 3)
 
     # --- Legend ---
     handles = [

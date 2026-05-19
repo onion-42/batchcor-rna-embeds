@@ -57,10 +57,10 @@ class FoldConfig:
 
     @property
     def pipeline_label(self) -> str:
-        """Human-readable pipeline name: 'Embedding + Correction'."""
+        """Human-readable pipeline name: 'Embedding' or 'Embedding + Correction'."""
         corr = self.correction_label or self.correction_method
         if corr == "none":
-            return f"{self.embedding_label} (raw)"
+            return self.embedding_label
         return f"{self.embedding_label} + {corr}"
 
 
